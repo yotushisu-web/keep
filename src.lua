@@ -3,7 +3,7 @@ local A = { Accent = "DEC173", RainbowUI = false, Selected = "", Storage = "Sess
 local document = { schema = 1, profiles = {}, accent = A.Accent, rainbowUI = false, selected = "" }
 local blockedFile = false
 local boolKeys = { "Enabled", "CloseRangeRush", "HighBallJumps", "JumpThenDive",
-"BackwardRecovery", "PositionAssist", "PreShotCoverage", "RespectManualMovement" }
+"BackwardRecovery", "PositionAssist", "PreShotCoverage", "RespectManualMovement", "LegitPrediction" }
 local diveModes = { SMART = true, FORWARD = true, LEFT = true, RIGHT = true, SIDES = true }
 local function copy(value)
 if type(value) ~= "table" then return value end
@@ -159,6 +159,7 @@ return persist()
 end
 return A
 end
+
 -- Configs use the same feature setters as the controls. A refused native setter
 -- rolls settings back instead of displaying a successful load.
 local function createDmcSettingsController(d)
@@ -166,7 +167,7 @@ local A = {}
 function A.Snapshot()
 local gk = {}
 for _, key in ipairs({ "CloseRangeRush", "HighBallJumps", "JumpThenDive", "BackwardRecovery",
-"PositionAssist", "PreShotCoverage", "RespectManualMovement", "PositionMode" }) do gk[key] = d.config[key] end
+"PositionAssist", "PreShotCoverage", "RespectManualMovement", "PositionMode", "LegitPrediction" }) do gk[key] = d.config[key] end
 gk.Enabled = d.gkEnabled()
 gk.DiveFilter = d.config.DiveFilter == "ALL" and "SMART" or d.config.DiveFilter
 return { goalkeeper = gk,
@@ -204,6 +205,7 @@ return false, "Config load failed: " .. tostring(err)
 end
 return A
 end
+
 local function showDmcUpdatePrompt(parent, hex)
 local gui = Instance.new("ScreenGui")
 gui.Name, gui.ResetOnSpawn, gui.DisplayOrder = "DmcUpdate", false, 1001
@@ -243,6 +245,7 @@ gui:Destroy()
 assert(waited, err)
 return acknowledged
 end
+
 -- Small, dependency-free startup controller. Game modules are loaded only after
 -- its status panel is visible. No executor-specific GUI or identity API is needed.
 local function createDmcStartup(d)
@@ -286,12 +289,13 @@ if not cleaned or released == false then message = message .. "\nCleanup incompl
 end
 B.error = message
 d.warn("[Dmc startup] " .. message)
-pcall(d.show, "Dmc | Startup failed", message .. "\nSend this error and your executor name when reporting the problem.")
+pcall(d.show, "Dmc | Startup failed", message .. "\n\nSend this error and your executor name when reporting the problem.")
 end
 return ok, err
 end
 return B
 end
+
 local function createDmcStartupDisplay()
 local gui, label, heading, closeConnection
 local function hide()
@@ -336,6 +340,7 @@ heading.Text, label.Text = title, message
 end
 return show, hide
 end
+
 local startupShow, startupHide = createDmcStartupDisplay()
 local BOOT = createDmcStartup({
 now = os.clock, wait = function() task.wait(0.05) end, spawn = task.spawn,
@@ -361,6 +366,7 @@ end
 return object
 end,
 })
+
 BOOT.Run(function()
 -- DMC MAIN BEGIN
 --==============================================================
@@ -381,6 +387,7 @@ if type(getgenv) == "function" then
 local ok, environment = pcall(getgenv)
 if ok and type(environment) == "table" then ENV = environment end
 end
+
 local settingsHttp = game:GetService("HttpService")
 local SettingsStore = createDmcConfigStore({
 version = RELEASE_VERSION, path = "Dmc_settings.json", cache = ENV.__DMC_CONFIG_CACHE,
@@ -389,6 +396,7 @@ encode = function(value) return settingsHttp:JSONEncode(value) end,
 decode = function(value) return settingsHttp:JSONDecode(value) end,
 remember = function(value) ENV.__DMC_CONFIG_CACHE = value end,
 })
+
 -- Keep the current instance running until all dependencies have loaded.
 --==============================================================
 -- MODULES
@@ -401,9 +409,11 @@ assert(object, "Missing dependency: " .. path)
 end
 return object
 end
+
 local function module(path)
 return BOOT.Load(path)
 end
+
 local M = {
 Dive = module("Modules.Actions.GoalkeeperDive"),
 Assist = module("Modules.Actions.GoalkeeperDiveAssist"),
@@ -433,15 +443,19 @@ Role = module("Client.Gameplay.Player.GoalkeeperRole"),
 Actors = module("Modules.Characters.Actors"),
 Motion = module("Modules.Characters.CharacterMotion"),
 }
+
 local BallRemotes = resolve("Remotes.Ball")
 local TackleRemote = BallRemotes:WaitForChild("Tackle", 5)
 local StateRemote = BallRemotes:WaitForChild("State", 5)
+
 assert(TackleRemote and StateRemote and PlayerGui, "Client is not ready")
+
 if SettingsStore.ShouldPrompt(ENV.AutoGKBuild, BUILD) then
 BOOT.Status("Waiting for update confirmation")
 assert(showDmcUpdatePrompt(PlayerGui, SettingsStore.Accent), "Update confirmation was closed before OK.")
 SettingsStore.Acknowledge()
 end
+
 if type(ENV.__AUTO_GK_CLEANUP) == "function" then
 local called, released, detail = pcall(ENV.__AUTO_GK_CLEANUP)
 assert(called, "Previous Auto GK cleanup threw: " .. tostring(released))
@@ -449,6 +463,7 @@ assert(released == true,
 "Previous Auto GK cleanup was not confirmed: "
 .. tostring(detail or "Older cleanup has no success result; rejoin once before loading this version"))
 end
+
 --==============================================================
 -- CONFIGURATION
 --==============================================================
@@ -498,7 +513,9 @@ MaxFinalCandidates = 14,
 RuntimeErrorRetrySeconds = 0.25,
 RuntimeErrorLimit = 3,
 Debug = false,
+LegitPrediction = true,
 }
+
 local Stats = {
 Requests = 0,
 JumpRequests = 0,
@@ -508,10 +525,12 @@ CatchesObserved = 0,
 ActionMatches = 0,
 Rejected = 0,
 }
+
 ENV.AutoGKConfig = Config
 ENV.AutoGKStats = Stats
 ENV.AUTO_GK_ENABLED = true
 ENV.AutoGKBuild = BUILD
+
 --==============================================================
 -- LIFECYCLE
 --==============================================================
@@ -601,14 +620,17 @@ displayCandidateSince = 0,
 moveLock = "AutoGK.ContactTest."
 .. tostring(math.floor(os.clock() * 1000000)),
 }
+
 -- Installed before listeners so partial initialization has the same cleanup contract.
 local function cleanup()
 if S.cleanupComplete then return true end
 if S.cleaningUp then return false, "Cleanup is already running" end
+
 S.cleaningUp = true
 S.alive = false
 ENV.AUTO_GK_ENABLED = false
 local failures = {}
+
 local function attempt(label, fn, ...)
 local ok, result, detail = pcall(fn, ...)
 if not ok or result == false then
@@ -618,14 +640,18 @@ return false
 end
 return true
 end
+
 if S.closeDropdown then attempt("UI close", S.closeDropdown) end
 if S.cancelUITweens then attempt("UI tweens", S.cancelUITweens) end
+
 if S.releaseMisc then attempt("Miscellaneous", S.releaseMisc) end
 if S.releaseStriker then attempt("Striker hooks", S.releaseStriker) end
 if S.releaseEvaluation then attempt("Evaluation observers", S.releaseEvaluation) end
+
 if S.releaseOwnedState then
 attempt("Owned state", S.releaseOwnedState, true)
 end
+
 -- Retain failed handles so a later call can retry them.
 local remaining = {}
 for _, connection in ipairs(S.connections) do
@@ -634,73 +660,91 @@ remaining[#remaining + 1] = connection
 end
 end
 S.connections = remaining
+
 if S.ui and attempt("UI destroy", function() S.ui:Destroy() end) then
 S.ui = nil
 S.closeDropdown = nil
 S.cancelUITweens = nil
 S.isUIInput = nil
 end
+
 if S.loopBusy then
 failures[#failures + 1] = "Main update is still finishing; retry cleanup"
 end
+
 if S.ownedMove or S.jump or S.jumpBlockOwned or S.motionLease
 or S.controller or next(S.retiredLocks) or next(S.retiredMotions) then
 failures[#failures + 1] = "Owned movement resources remain"
 end
+
 S.cleanupComplete = #failures == 0
 S.cleanupError = #failures > 0 and table.concat(failures, "; ") or nil
 S.cleaningUp = false
+
 if S.cleanupComplete then
 ENV.__AUTO_GK_CONTROLLER = nil
 else
 warn("[Auto GK] Cleanup incomplete: " .. S.cleanupError)
 end
+
 return S.cleanupComplete, S.cleanupError
 end
+
 ENV.__AUTO_GK_CLEANUP = cleanup
 ENV.StopAutoGK = cleanup
 BOOT.cleanup = cleanup
+
 local function connect(signal, fn)
 local c = signal:Connect(fn)
 table.insert(S.connections, c)
 return c
 end
+
 local function log(message)
 if Config.Debug then
 print("[Auto GK] " .. message)
 end
 end
+
 local function report(key, message)
 if os.clock() >= (S.lastWarning[key] or 0) then
 S.lastWarning[key] = os.clock() + 4
 warn("[Auto GK] " .. key .. ": " .. tostring(message))
 end
 end
+
 local function flushStatusDisplay()
 if not S.displayCandidate then return end
+
 local clock = os.clock()
+
 if clock >= S.displayUntil
 and clock - S.displayCandidateSince
 >= Config.UIStatusDebounce then
+
 S.displayName = S.status
 S.displayDetail = S.detail
 S.displayCandidate = nil
 end
 end
+
 local function status(name: string, detail)
 S.status = name
 S.detail = detail or ""
+
 if S.displayName == name then
 S.displayDetail = S.detail
 S.displayCandidate = nil
 return
 end
+
 local event =
 name == "CATCH OBSERVED"
 or name == "SERVER REJECTED"
 or name == "JUMP QUEUED"
 or name == "CLOSE-RANGE RUSH"
 or string.sub(name, 1, 9) == "DIVE SENT"
+
 local immediate =
 event
 or name == "OFF"
@@ -712,6 +756,7 @@ or name == "MANUAL DODGE"
 or name == "RAGDOLL"
 or name == "ROUND TRANSITION"
 or name == "WINDOW UNFOCUSED"
+
 if immediate then
 S.displayName = name
 S.displayDetail = S.detail
@@ -720,40 +765,50 @@ S.displayUntil = os.clock()
 + (event and Config.UIEventHoldSeconds or 0)
 return
 end
+
 if S.displayCandidate ~= name then
 S.displayCandidate = name
 S.displayCandidateSince = os.clock()
 end
+
 flushStatusDisplay()
 end
+
 local function flat(v)
 return Vector3.new(v.X, 0, v.Z)
 end
+
 local function finite(n)
 return type(n) == "number"
 and n == n
 and math.abs(n) < math.huge
 end
+
 local function finiteVector(v)
 return typeof(v) == "Vector3"
 and finite(v.X)
 and finite(v.Y)
 and finite(v.Z)
 end
+
 local function unit(v, fallback)
 v = flat(v)
+
 return v.Magnitude > 0.0001
 and v.Unit
 or (fallback or Vector3.new(0, 0, -1))
 end
+
 local function now()
 return M.Clock.GetSmoothedServerTime()
 end
+
 local function inputActive()
 if not S.focused
 or UserInputService:GetFocusedTextBox() then
 return true
 end
+
 for _, key in ipairs({
 Enum.KeyCode.W,
 Enum.KeyCode.A,
@@ -768,51 +823,63 @@ if UserInputService:IsKeyDown(key) then
 return true
 end
 end
+
 return S.stick.Magnitude > 0.12
 or next(S.touches) ~= nil
 end
+
 connect(UserInputService.InputChanged, function(input)
 if input.KeyCode == Enum.KeyCode.Thumbstick1 then
 S.stick = Vector2.new(input.Position.X, input.Position.Y)
 end
 end)
+
 connect(UserInputService.InputBegan, function(input)
 if input.UserInputType == Enum.UserInputType.Touch then
 S.touches[input] = true
 end
 end)
+
 connect(UserInputService.InputEnded, function(input)
 S.touches[input] = nil
+
 if input.KeyCode == Enum.KeyCode.Thumbstick1 then
 S.stick = Vector2.zero
 end
 end)
+
 connect(UserInputService.WindowFocusReleased, function()
 S.focused = false
 S.stick = Vector2.zero
 table.clear(S.touches)
 end)
+
 connect(UserInputService.WindowFocused, function()
 S.focused = true
 S.manualUntil = os.clock() + Config.ManualReleaseGrace
 S.nextPlanAt = 0
 end)
+
 --==============================================================
 -- ACTION ACCOUNTING
 --==============================================================
 local function recordRequest(kind, frame)
 Stats.Requests = Stats.Requests + 1
+
 if kind == "JUMP" then
 Stats.JumpRequests = Stats.JumpRequests + 1
 elseif kind == "DIVE" then
 Stats.DiveRequests = Stats.DiveRequests + 1
 end
+
 local key = frame and frame.flightKey
+
 if key and not S.countedFlights[key] then
 S.countedFlights[key] = true
 Stats.FlightsActedOn = Stats.FlightsActedOn + 1
 end
 end
+
 --==============================================================
 -- MOVEMENT OWNERSHIP
 --==============================================================
@@ -821,15 +888,19 @@ S.positionActive = false
 S.positionTarget = nil
 S.positionKey = nil
 end
+
 local function noteMoveRelease(reason)
 S.lastReleaseReason = reason
 S.releaseReasons[reason] =
 (S.releaseReasons[reason] or 0) + 1
+
 return reason
 end
+
 local function releaseMove(allowWrite)
 local character, owned = S.moveCharacter, S.ownedMove
 resetPositionTarget()
+
 local function released(reason)
 if S.moveCharacter == character and S.ownedMove == owned then
 S.ownedMove = nil
@@ -837,22 +908,27 @@ S.moveCharacter = nil
 end
 return reason == "NONE" and reason or noteMoveRelease(reason)
 end
+
 if not owned or owned.Magnitude == 0 then return released("NONE") end
 if not character or not character.Parent then return released("CHARACTER_GONE") end
 if not allowWrite then return released("YIELD_WITHOUT_WRITE") end
+
 if inputActive() and S.focused
 and not UserInputService:GetFocusedTextBox() then
 return released("MANUAL_INPUT")
 end
+
 local current = M.Controllers.GetMoveCommand(character)
 if current.Magnitude == 0 then return released("ALREADY_ZERO") end
 if current.Unit:Dot(owned.Unit) <= 0.999 then return released("COMMAND_CHANGED") end
+
 -- Do not discard ownership until the write succeeds.
 assert(M.Controllers.SetMoveCommand(character, Vector3.zero) ~= false,
 "Automatic movement stop was refused")
 S.releaseWrites = S.releaseWrites + 1
 return released("STOPPED")
 end
+
 local function invalidateFrame(allowWrite)
 S.lastFrame = nil
 S.keeperWait = nil
@@ -863,6 +939,7 @@ S.coverageNextAt = 0
 S.nextPlanAt = 0
 releaseMove(allowWrite)
 end
+
 local function releaseMotionLock(lease)
 if not lease or not lease.lockHeld then
 return true
@@ -882,6 +959,7 @@ report("OWN LOCK RELEASE", err)
 end
 return ok
 end
+
 local function releaseMotionController(lease)
 if not lease or not lease.cancelPending then return true end
 local ok, result = pcall(lease.controller.Cancel)
@@ -894,6 +972,7 @@ S.retiredMotions[lease] = true
 report("OWN MOTION CANCEL", result)
 return false
 end
+
 local function finishMotion(cancel, expected)
 local lease = S.motionLease
 if not lease or (expected and lease ~= expected) then
@@ -913,6 +992,7 @@ end
 local unlocked = releaseMotionLock(lease)
 return canceled and unlocked
 end
+
 local function serviceOwnedMotion()
 for lease in pairs(S.retiredMotions) do
 if os.clock() >= (lease.cancelRetryAt or 0) then
@@ -949,6 +1029,7 @@ report(
 finishMotion(true, lease)
 end
 end
+
 local function manualJumpHeld()
 local ok, held = pcall(function()
 local binding = M.Keybinds.Get("Jump")
@@ -984,6 +1065,7 @@ report("JUMP INPUT READ", held)
 end
 return not ok or held == true
 end
+
 local function releaseJumpLatch()
 local jump = S.jump
 if jump and jump.latch then
@@ -994,6 +1076,7 @@ jump.latch = false
 end
 return true
 end
+
 local function cancelOwnedJumpQueue()
 local queued = S.jump and S.jump.phase == "QUEUED"
 if not queued then
@@ -1029,6 +1112,7 @@ S.pending = nil
 end
 return true
 end
+
 local function authorizedFrame(frame)
 return S.alive
 and Config.Enabled
@@ -1041,6 +1125,7 @@ and frame.humanoid.Health > 0
 and M.Match.IsGoalkeeperCharacter(frame.character)
 and os.clock() >= S.manualActionUntil
 end
+
 local function blocked(character, root)
 if next(S.retiredMotions) or next(S.retiredLocks) then
 return "OWN CLEANUP PENDING"
@@ -1085,6 +1170,7 @@ return "MOVEMENT LOCK"
 end
 return nil
 end
+
 --==============================================================
 -- DEFENDED GOAL
 --==============================================================
@@ -1145,6 +1231,7 @@ forward = forward,
 right = Vector3.new(-forward.Z, 0, forward.X),
 }
 end
+
 local function goalHalfWidth(context)
 local goal = context.goal
 local frame, size, axis =
@@ -1155,6 +1242,7 @@ math.abs(frame.RightVector:Dot(axis)) * size.X
 + math.abs(frame.LookVector:Dot(axis)) * size.Z
 ) * 0.5)
 end
+
 --==============================================================
 -- BALL SNAPSHOT
 --==============================================================
@@ -1197,6 +1285,7 @@ or finite(state.ActionId) and ("action:" .. tostring(state.ActionId))
 or ("legacy:" .. tostring(state.StartedAt))),
 }
 end
+
 local function unavailableStatus(ball, context)
 local mode = context and context.mode or "CLIENT"
 if ball.phase == "OWNED" then
@@ -1231,6 +1320,7 @@ status(
 end
 end
 end
+
 -- Renderer advances/rebases position, velocity and timestamps while drawing.
 -- These scalar identifiers are explicitly preserved by its sampleStateAtTime.
 -- Actual Movement events remain the fallback when identifiers are unavailable.
@@ -1246,6 +1336,7 @@ radius = finite(state.Radius) and state.Radius or nil,
 blockedGoalTeam = state.BlockedGoalTeamName,
 }
 end
+
 local function sameTrajectory(a, b)
 if a == b then return true end
 if not a or not b then return false end
@@ -1255,6 +1346,7 @@ and a.flightStartedAt == b.flightStartedAt
 and a.radius == b.radius
 and a.blockedGoalTeam == b.blockedGoalTeam
 end
+
 local function trajectoryChanged(frame, ball)
 local before, state = frame.sourceTrajectory, ball.state
 if not before or not state then return false end
@@ -1267,9 +1359,11 @@ return before.movementSequence ~= sequence or before.actionId ~= actionId
 or before.flightStartedAt ~= flightStartedAt
 or before.radius ~= radius or before.blockedGoalTeam ~= state.BlockedGoalTeamName
 end
+
 local function plannerSetting(value, fallback, low, high)
 return math.clamp(finite(value) and value or fallback, low, high)
 end
+
 local function plannerDeadline(frame)
 -- Match the original cadence from snapshot completion. Modelled launch
 -- deadlines still belong to the time at which that snapshot was read.
@@ -1282,10 +1376,12 @@ local deadline = anchor + 1 / hz
 if finite(frame.launchAt) then deadline = math.min(deadline, frame.launchAt) end
 return deadline
 end
+
 local function trackPlanWindow(frame, plan)
 frame.launchAt = plan and plan.kind == "DIVE" and finite(plan.delay)
 and plan.delay > 0 and frame.readClock + plan.delay or nil
 end
+
 local function snapshot(character, root, humanoid)
 local readClock = os.clock()
 local ball = readBall()
@@ -1391,6 +1487,7 @@ or nil,
 radius = radius,
 }
 end
+
 --==============================================================
 -- TRAJECTORY MODELS
 --==============================================================
@@ -1406,6 +1503,7 @@ return f.rootCF
 + f.movementVelocity * t
 + Vector3.new(0, dy, 0)
 end
+
 -- Use the same ballistic/floor model as naturalRoot to end airborne receiving.
 -- The actual native state is read again on every fresh snapshot.
 local function holdLandingTime(f)
@@ -1422,6 +1520,7 @@ return (velocity + speed) / f.gravity
 end
 return velocity < 0 and height / -velocity or math.huge
 end
+
 local function jumpedRoot(f, t, queueDelay)
 local elapsed = math.max(0, t - queueDelay)
 local rise = math.max(
@@ -1433,6 +1532,7 @@ return f.rootCF
 + f.movementVelocity * t
 + Vector3.new(0, rise, 0)
 end
+
 local function diveRoot(f, plan, t)
 local elapsed = math.max(0, t - plan.delay)
 local assist = plan.assist
@@ -1463,6 +1563,7 @@ return plan.origin
 + direction * travel
 + Vector3.new(0, rise, 0)
 end
+
 local function rootAt(f, plan, t)
 if plan.kind == "HOLD" then
 return naturalRoot(f, t)
@@ -1472,6 +1573,7 @@ return jumpedRoot(f, t, plan.queueDelay)
 end
 return diveRoot(f, plan, t)
 end
+
 local function sampleFlight(f, horizon)
 local points = {
 { t = 0, p = f.state.Position },
@@ -1513,6 +1615,7 @@ p = state.Position,
 end
 return points
 end
+
 local function paddedBox(source, amount)
 return {
 Size = source.Size
@@ -1521,6 +1624,7 @@ CFrameOffset = source.CFrameOffset,
 Shape = source.Shape,
 }
 end
+
 local function receiveBox(f, plan, airborne)
 if plan.kind == "HOLD" then
 return M.Hitboxes.ExtendToFeet(
@@ -1541,6 +1645,7 @@ f.radius * 2
 )
 return paddedBox(M.Hitboxes.AirReceive, padding)
 end
+
 --==============================================================
 -- THREE-DIMENSIONAL CONTACT VALIDATION
 --==============================================================
@@ -1581,6 +1686,7 @@ math.abs(right.Z) * half.X + math.abs(up.Z) * half.Y + math.abs(look.Z) * half.Z
 if not finiteVector(extent) then return nil, nil end
 return offset, extent
 end
+
 local function inspectPath(f, plan, points, requireContact)
 local first =
 (plan.kind == "DIVE" or plan.kind == "JUMP_DIVE")
@@ -1744,6 +1850,7 @@ miss = nearest,
 clearance = math.max(0, deepest),
 }
 end
+
 local function allowedDirections(f)
 local filter = Config.DiveFilter
 local result
@@ -1776,6 +1883,7 @@ end
 end
 return result
 end
+
 local function makeDive(f, kind, delay, name)
 local basis = CFrame.lookAt(
 f.rootCF.Position,
@@ -1800,6 +1908,7 @@ basis = basis,
 queueDelay = S.queueEstimate,
 }
 end
+
 local function actionCost(plan, hit)
 if plan.kind == "HOLD" then
 return -10
@@ -1817,6 +1926,7 @@ return cost
 - hit.clearance * 0.7
 + hit.time * 0.05
 end
+
 local function prepareAssist(f, plan)
 local proxy = {
 CFrame = plan.origin,
@@ -1840,6 +1950,7 @@ assist
 end
 return assist
 end
+
 local function evaluateDive(f, kind, delay, name, points, prepared)
 local base = prepared or makeDive(f, kind, delay, name)
 base.useAssist = false
@@ -1881,6 +1992,7 @@ end
 end
 return best
 end
+
 local function choosePlan(candidates)
 table.sort(candidates, function(a, b)
 if a.score ~= b.score then
@@ -1894,6 +2006,7 @@ return tostring(a.name or a.kind)
 end)
 return candidates[1]
 end
+
 -- A broad bound for every dive direction/delay in this search. It encloses
 -- full assisted travel, the rotated contact box, and pre-launch locomotion.
 -- The bounds include ALL sampled segments; being outside the goal area alone
@@ -1942,6 +2055,7 @@ or minX > math.max(start.X, finish.X) + reach
 or maxZ < math.min(start.Z, finish.Z) - reach
 or minZ > math.max(start.Z, finish.Z) + reach)
 end
+
 -- Receiver/blocker forecasts only postpone an already verified dive. They
 -- never suppress a goal-bound ball or authorize a contact on a guessed bounce.
 local KeeperTiming = {
@@ -2131,6 +2245,7 @@ S.keeperTimingErrors = (S.keeperTimingErrors or 0) + 1
 S.keeperTimingError = tostring(result)
 return plan
 end
+
 local function planSave(f)
 local began = os.clock()
 S.immediatePlansChecked = 0
@@ -2281,6 +2396,7 @@ and "NO CONTACT / SEARCH LIMIT"
 or "NO PRE-GOAL CONTACT"
 )
 end
+
 --==============================================================
 -- NATIVE JUMP STATE
 --==============================================================
@@ -2293,6 +2409,12 @@ end
 if not authorizedFrame(f) or manualJumpHeld() then
 return false
 end
+
+-- Legit Prediction: Add a tiny, safe human-like reaction variance
+if Config.LegitPrediction then
+S.queueEstimate = math.clamp(S.queueEstimate + (math.random(20, 60) / 1000), 0.05, 0.15)
+end
+
 if S.ownedMove then
 releaseMove(true)
 S.nextPlanAt = 0
@@ -2415,6 +2537,7 @@ f.eta
 ))
 return true
 end
+
 local function updateJump(character, root, humanoid)
 local j = S.jump
 if not j then return false end
@@ -2473,6 +2596,7 @@ S.jump = nil
 end
 return false
 end
+
 --==============================================================
 -- HOLD COMMIT VALIDATION
 --==============================================================
@@ -2542,12 +2666,14 @@ string.format("Rechecked receive in %.3fs", hit.time)
 )
 return true
 end
+
 --==============================================================
 -- INPUT AND FRAME RESET
 --==============================================================
 local function cancelQueuedJump()
 return cancelOwnedJumpQueue()
 end
+
 local function queuedJumpMustCancel(ball)
 local jump = S.jump
 if not jump or jump.phase ~= "QUEUED" then
@@ -2564,6 +2690,7 @@ ball.phase ~= "MOVEMENT"
 or jump.flightKey ~= ball.flightKey
 ))
 end
+
 local function releaseOwnedState(allowWrite)
 local failures = {}
 local function attempt(label, fn, ...)
@@ -2635,7 +2762,9 @@ failures[#failures + 1] = "Owned movement resources remain"
 end
 return #failures == 0, table.concat(failures, "; ")
 end
+
 S.releaseOwnedState = releaseOwnedState
+
 local function hasOwnedState()
 return S.wasKeeper
 or S.motionLease ~= nil
@@ -2645,6 +2774,7 @@ or S.jumpBlockOwned
 or next(S.retiredLocks) ~= nil
 or next(S.retiredMotions) ~= nil
 end
+
 connect(UserInputService.InputBegan, function(input, processed)
 if not S.alive or processed or not S.wasKeeper then
 return
@@ -2669,6 +2799,7 @@ return
 end
 end
 end)
+
 --==============================================================
 -- DIVE REQUEST AND RECOVERY
 --==============================================================
@@ -2947,6 +3078,7 @@ sentActionId
 ))
 return true
 end
+
 --==============================================================
 -- POSITION ASSIST
 --==============================================================
@@ -3175,6 +3307,7 @@ S.ownedMove = desired
 S.moveCharacter = f.character
 S.positionWrites = S.positionWrites + 1
 end
+
 --==============================================================
 -- OBSERVATIONS
 --==============================================================
@@ -3186,6 +3319,7 @@ end
 return pending.id
 or (pending.command and pending.command.ActionId)
 end
+
 connect(StateRemote.OnClientEvent, function(payload)
 if not S.alive or typeof(payload) ~= "table" then
 return
@@ -3246,6 +3380,7 @@ if S.pending and payload.BallId == S.pending.ballId then
 S.pending = nil
 end
 end)
+
 connect(TackleRemote.OnClientEvent, function(packet)
 if not S.alive
 or typeof(packet) ~= "table"
@@ -3300,8 +3435,9 @@ log(
 .. tostring(packet.Command.ActionId)
 )
 end)
+
 --==============================================================
--- CLOSE-RANGE RUSH
+-- CLOSE-RANGE RUSH (HEAVILY OPTIMIZED)
 --==============================================================
 Config.CloseRangeRush = true
 Stats.RushRequests = 0
@@ -3309,19 +3445,21 @@ local Rush = {
 Role = M.Role,
 Actors = M.Actors,
 Motion = M.Motion,
-Range = 12,
-GoalDepth = 28,
-ContactHorizon = 0.30,
-ScanInterval = 0.05,
-ConfirmSeconds = 0.05,
+Range = 15, -- Increased from 12 to catch them earlier
+GoalDepth = 30,
+ContactHorizon = 0.40, -- Increased from 0.30 to guarantee tackle registration
+ScanInterval = 0.02, -- Ultra-fast scanning (from 0.05)
+ConfirmSeconds = 0.02, -- Instant confirmation (from 0.05)
 nextScan = 0,
 candidate = nil,
 candidateSince = 0,
 lastSeenAt = 0,
 }
+
 local function rushVector(v)
 return finiteVector(v)
 end
+
 local function rushSnapshot(character, root, humanoid)
 if not Config.CloseRangeRush
 or S.jump
@@ -3423,7 +3561,8 @@ local goalDirection = unit(goalPosition - targetPosition)
 local facingGoal =
 unit(targetRoot.CFrame.LookVector):Dot(goalDirection)
 > 0.40
-if distance > 6 and closing < 1 and not facingGoal then
+-- Relaxed conditions to ensure it triggers on ANY close threat in the box
+if distance > 10 and closing < 0.5 and not facingGoal then
 return nil
 end
 local floorY = M.Grounding.GetStandingY(humanoid, root)
@@ -3448,6 +3587,7 @@ readClock = os.clock(),
 halfWidth = halfWidth,
 }
 end
+
 local function rushDirectionAllowed(direction, context)
 local forward = direction:Dot(context.forward)
 local right = direction:Dot(context.right)
@@ -3467,6 +3607,7 @@ return math.abs(right) > 0.35
 end
 return true
 end
+
 local function rushContact(f, plan)
 local horizon = math.min(
 Rush.ContactHorizon,
@@ -3512,6 +3653,7 @@ previousRoot = rootCF
 end
 return nil
 end
+
 local function rushPathClear(f, plan)
 local exclusions = { f.character, f.target }
 local renderedBall = M.Renderer.GetBall()
@@ -3565,6 +3707,7 @@ previous = position
 end
 return true
 end
+
 local function rushPlan(f)
 local best
 local toward = unit(
@@ -3606,6 +3749,7 @@ end
 end
 return best
 end
+
 local function tryCloseRush(character, root, humanoid)
 if os.clock() < Rush.nextScan then return false end
 Rush.nextScan = os.clock() + Rush.ScanInterval
@@ -3762,6 +3906,7 @@ plan.contact
 ))
 return true
 end
+
 --==============================================================
 -- PRE-SHOT ANGLE COVERAGE
 --==============================================================
@@ -3805,6 +3950,7 @@ return context.goal.Position
 + context.forward * depth
 + context.right * lateral
 end
+
 local function coverageSnapshot(
 character,
 root,
@@ -3878,6 +4024,7 @@ readClock = os.clock(),
 goalFrame = context.goal.CFrame,
 }
 end
+
 local function coverCarrier(
 character,
 root,
@@ -3949,6 +4096,7 @@ or "Holding the covered angle"
 end
 return true
 end
+
 --==============================================================
 -- MAIN LOOP
 --==============================================================
@@ -4220,6 +4368,7 @@ else
 requestDive(f, plan)
 end
 end
+
 connect(RunService.Heartbeat, function(dt)
 if not S.alive or S.loopBusy
 or os.clock() < S.runtimeRetryAt then return end
@@ -4247,6 +4396,7 @@ S.runtimeRetryAt = 0
 S.runtimeError = nil
 end
 end)
+
 -- STR: native aim input, bounded search, keeper and defender reach estimates.
 local function createStriker(d)
 local A = { Enabled = false, AutoCurve = false, SmartRelease = false, Ready = false, Status = "OFF", Detail = "", LastError = nil }
@@ -4649,7 +4799,7 @@ local error2 = target - seed.hit
 local determinant = seed.dx.X * seed.dy.Y - seed.dy.X * seed.dx.Y
 if math.abs(determinant) > 1e-5 then
 yaw = seed.yaw + math.clamp((error2.X * seed.dy.Y - seed.dy.X * error2.Y) / determinant, -0.6, 0.6)
-pitch = math.clamp(seed.pitch + math.clamp((seed.dx.X * error2.Y - error2.X * seed.dx.Y) / determinant, -0.45, 1.25), -1.25, 1.25)
+pitch = math.clamp(seed.pitch + math.clamp((seed.dx.X * error2.Y - error2.X * seed.dx.Y) / determinant, -0.45, 0.45), -1.25, 1.25)
 seeded = true
 end
 end
@@ -5270,10 +5420,10 @@ retained = true
 table.sort(owner.candidates, function(a, b) return betterRating(a.rating, b.rating) end)
 while #owner.candidates > 15 do table.remove(owner.candidates) end
 end
+end
 coroutine.yield()
 return retained
 end
-coroutine.yield()
 local targets = searchTargets(solveFrame)
 -- Establish inexpensive left/right proposals before the iterative height solves.
 -- Preserve the user's camera pitch as a seed; the native full flight still has
@@ -5512,7 +5662,7 @@ if a == incumbent then return b ~= incumbent end
 if b == incumbent then return false end
 -- Alternate strength and age: refresh a strong finished corner promptly,
 -- while stale or invalid leaders cannot permanently hide other lanes.
-if prioritize_best then
+if prioritizeBest then
 local ar, br = priorities[a], priorities[b]
 if betterRating(ar, br) then return true end
 if betterRating(br, ar) then return false end
@@ -6116,6 +6266,7 @@ horizontalReach = horizontalReach, searchTargets = searchTargets, shotZone = sho
 setSession = function(value) session = value end, getSession = function() return session end } end
 return A
 end
+
 -- Auto dribble uses the game's native input, cooldowns and stamina rules.
 local function createStrikerMisc(d)
 local A = { AutoDribble = false, DribbleStatus = "OFF" }
@@ -6930,6 +7081,7 @@ if d.test then A.Test = { contactTime = contactTime, segmentBox = segmentBox, ki
 alignDisplayedMotion = alignDisplayedMotion } end
 return A
 end
+
 -- Bounded, passive evidence collection. No aim, physics, stamina or action decisions.
 local function createStrikerEvaluation(d)
 local A = {}
@@ -7456,6 +7608,7 @@ end
 end)
 return A
 end
+
 local evaluationRemotes = {}
 for _, remote in ipairs(BallRemotes:GetChildren()) do
 if remote ~= StateRemote and (remote:IsA("RemoteEvent") or remote:IsA("UnreliableRemoteEvent")) then
@@ -7502,6 +7655,7 @@ local ok, detail = EVALUATION.Mark(kind, outcome, id)
 print("[Dmc Evaluation]", ok and "Outcome recorded" or "Not recorded", detail)
 return ok, detail
 end
+
 local STR = createStriker({
 M = M, Player = LocalPlayer, Players = Players, Input = UserInputService,
 load = module, alive = function() return S.alive end,
@@ -7514,6 +7668,7 @@ local result = STR.Debug()
 print("[Auto STR]", game:GetService("HttpService"):JSONEncode(result))
 return result
 end
+
 local MISC = createStrikerMisc({
 M = M, Player = LocalPlayer, Players = Players, Input = UserInputService,
 Run = RunService, Gui = game:GetService("GuiService"), load = module,
@@ -7536,216 +7691,1599 @@ local result = MISC.Debug()
 print("[Dmc Misc]", game:GetService("HttpService"):JSONEncode(result))
 return result
 end
+
 --==============================================================
--- INTERFACE CONTROLS (UI DISABLED - AUTO-ENABLE ACTIVE)
+-- INTERFACE CONTROLS
 --==============================================================
 local function toggleEnabled(value)
-	ENV.AUTO_GK_ENABLED = value == true
-	S.nextPlanAt = 0
-	if ENV.AUTO_GK_ENABLED then
-		S.runtimeFailures = 0
-		S.runtimeRetryAt = 0
-		S.runtimeError = nil
-	end
-	if not ENV.AUTO_GK_ENABLED then
-		releaseOwnedState(true)
-		status("OFF", "Manual controls untouched")
-	end
+ENV.AUTO_GK_ENABLED = value == true
+S.nextPlanAt = 0
+if ENV.AUTO_GK_ENABLED then
+S.runtimeFailures = 0
+S.runtimeRetryAt = 0
+S.runtimeError = nil
+end
+if not ENV.AUTO_GK_ENABLED then
+releaseOwnedState(true)
+status("OFF", "Manual controls untouched")
+end
 end
 
--- Stub UI states so the main loop and cleanup functions don't crash
-S.ui = nil
-S.uiBusy = false
-S.closeDropdown = function() end
-S.cancelUITweens = function() end
-S.isUIInput = function() return false end
+--==============================================================
+-- INTERFACE
+--==============================================================
+do
+local oldGui = PlayerGui:FindFirstChild("AutoGKInterface")
+if oldGui then oldGui:Destroy() end
 
--- ==========================================
--- FORCE ENABLE REQUESTED FEATURES
--- ==========================================
--- 1. Auto Goalkeeper
-ENV.AUTO_GK_ENABLED = true
+local C = {
+background = Color3.fromRGB(16, 16, 15),
+surface = Color3.fromRGB(23, 23, 21),
+control = Color3.fromRGB(29, 29, 26),
+hover = Color3.fromRGB(39, 37, 30),
+pressed = Color3.fromRGB(53, 47, 32),
+stroke = Color3.fromRGB(49, 47, 39),
+text = Color3.fromRGB(242, 243, 240),
+muted = Color3.fromRGB(178, 181, 175),
+accent = Color3.fromRGB(222, 193, 115),
+accentDim = Color3.fromRGB(131, 111, 61),
+active = Color3.fromRGB(43, 39, 27),
+}
 
--- 2. Assist Shot (Auto STR)
-if STR and STR.SetEnabled then 
-    STR.SetEnabled(true) 
+local readableFont = Font.new(Font.fromEnum(Enum.Font.Nunito).Family, Enum.FontWeight.SemiBold, Enum.FontStyle.Normal)
+local themeBindings = {}
+local function trackTheme(object, properties)
+local bindings = themeBindings[object] or {}
+for _, property in ipairs({ "BackgroundColor3", "TextColor3", "PlaceholderColor3", "Color", "ScrollBarImageColor3" }) do
+local value = properties[property]
+if value ~= nil then
+bindings[property] = nil
+for key, color in pairs(C) do
+if value == color then bindings[property] = key; break end
+end
+end
+end
+themeBindings[object] = bindings
+end
+local function setThemed(object, property, value)
+trackTheme(object, { [property] = value })
+object[property] = value
+end
+local function setPalette(hex)
+local r, g, b = tonumber(hex:sub(1, 2), 16), tonumber(hex:sub(3, 4), 16), tonumber(hex:sub(5, 6), 16)
+C.accent = Color3.fromRGB(r, g, b)
+if hex == "DEC173" then
+C.accentDim, C.active = Color3.fromRGB(131, 111, 61), Color3.fromRGB(43, 39, 27)
+C.hover, C.pressed, C.stroke = Color3.fromRGB(39, 37, 30), Color3.fromRGB(53, 47, 32), Color3.fromRGB(49, 47, 39)
+else
+local function blend(base, weight)
+return Color3.fromRGB(math.floor(base + (r - base) * weight + 0.5),
+math.floor(base + (g - base) * weight + 0.5), math.floor(base + (b - base) * weight + 0.5))
+end
+C.accentDim, C.active = blend(16, 0.55), blend(16, 0.13)
+C.hover, C.pressed, C.stroke = blend(24, 0.08), blend(24, 0.16), blend(35, 0.09)
+end
+end
+local function create(class, properties, parent)
+local object = Instance.new(class)
+for key, value in pairs(properties) do object[key] = value end
+if properties.Font == Enum.Font.Nunito then object.FontFace = readableFont end
+trackTheme(object, properties)
+object.Parent = parent
+return object
+end
+local function round(object, radius)
+create("UICorner", { CornerRadius = UDim.new(0, radius) }, object)
+return object
+end
+local function stroke(object, color, thickness)
+return create("UIStroke", {
+Color = color or C.stroke,
+Thickness = thickness or 1,
+ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+}, object)
+end
+local function frame(parent, name, x, y, w, h, color)
+return create("Frame", {
+Name = name, Position = UDim2.fromOffset(x, y),
+Size = UDim2.fromOffset(w, h), BackgroundColor3 = color or C.surface,
+BorderSizePixel = 0,
+}, parent)
+end
+local function text(parent, value, size, properties)
+local p = {
+Text = value, TextSize = math.max(13, size + 3), Font = Enum.Font.Nunito,
+TextColor3 = C.text, BackgroundTransparency = 1,
+TextXAlignment = Enum.TextXAlignment.Left,
+BorderSizePixel = 0,
+}
+for key, v in pairs(properties or {}) do p[key] = v end
+return create("TextLabel", p, parent)
+end
+local function button(parent, properties)
+local p = {
+Text = "", TextSize = 14, Font = Enum.Font.FredokaOne,
+TextColor3 = C.text, BackgroundColor3 = C.control,
+BorderSizePixel = 0, AutoButtonColor = false,
+Modal = false, Selectable = true,
+}
+for key, value in pairs(properties) do p[key] = value end
+return round(create("TextButton", p, parent), 5)
+end
+local function chevron(parent, name, x, y)
+local icon = frame(parent, name, x, y, 14, 14)
+icon.BackgroundTransparency, icon.Visible = 1, true
+icon.ZIndex = parent.ZIndex + 1
+local white = Color3.fromRGB(255, 255, 255)
+local left = round(frame(icon, "Left", 1, 6, 8, 3, white), 2)
+local right = round(frame(icon, "Right", 6, 6, 8, 3, white), 2)
+left.Rotation, right.Rotation = 45, -45
+left.ZIndex, right.ZIndex = icon.ZIndex + 1, icon.ZIndex + 1
+left.BackgroundTransparency, right.BackgroundTransparency = 0, 0
+themeBindings[left].BackgroundColor3, themeBindings[right].BackgroundColor3 = nil, nil
+return icon
 end
 
--- 3. Auto Curve
-if STR and STR.SetAutoCurve then 
-    STR.SetAutoCurve(true) 
+local Gui = create("ScreenGui", {
+Name = "AutoGKInterface", ResetOnSpawn = false, Enabled = true,
+IgnoreGuiInset = true, DisplayOrder = 20,
+ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, PlayerGui)
+S.ui = Gui
+
+-- Host position is in screen pixels; only the panel and its children scale.
+local host = create("Frame", {
+Name = "WindowHost", Position = UDim2.fromOffset(20, 138),
+Size = UDim2.fromOffset(0, 0), BackgroundTransparency = 1,
+BorderSizePixel = 0,
+}, Gui)
+
+local panel = round(frame(host, "Panel", 0, 0, 316, 494, C.background), 9)
+panel.Active = true
+stroke(panel, C.accentDim)
+local uiScale = create("UIScale", { Scale = 1 }, panel)
+
+local header = frame(panel, "DragHandle", 12, 0, 224, 40)
+header.BackgroundTransparency = 1
+header.Active = true
+text(header, "Dmc", 13, {
+Name = "PageTitle", Size = UDim2.fromScale(1, 1),
+Font = Enum.Font.FredokaOne,
+})
+
+local minimize = button(panel, {
+Name = "Minimize", Text = "-", TextSize = 18,
+Position = UDim2.new(1, -68, 0, 8), Size = UDim2.fromOffset(24, 24),
+})
+local unload = button(panel, {
+Name = "Unload", Text = "x", TextSize = 12,
+Position = UDim2.new(1, -36, 0, 8), Size = UDim2.fromOffset(24, 24),
+})
+
+local tabBar = frame(panel, "Tabs", 12, 44, 292, 26)
+tabBar.BackgroundTransparency = 1
+
+-- STR is independent of the goalkeeper automation toggle.
+local strikerContent = frame(panel, "STRContent", 12, 76, 292, 333)
+strikerContent.BackgroundTransparency = 1
+strikerContent.Visible = false
+
+local live = round(frame(panel, "LiveStatus", 12, 76, 292, 28, C.surface), 5)
+local dot = round(frame(live, "StatusDot", 10, 11, 6, 6, C.muted), 3)
+local stateText = text(live, "STARTING", 10, {
+Name = "Status", Position = UDim2.fromOffset(24, 0),
+Size = UDim2.new(1, -34, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd,
+})
+
+-- GK retains its existing controls in one scroll surface below the tabs.
+local content = create("ScrollingFrame", {
+Name = "MainContent", Position = UDim2.fromOffset(12, 114),
+Size = UDim2.fromOffset(292, 368), BackgroundTransparency = 1,
+BorderSizePixel = 0, ClipsDescendants = true,
+ScrollingDirection = Enum.ScrollingDirection.Y,
+ScrollBarThickness = 2, ScrollBarImageColor3 = C.accentDim,
+CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+}, panel)
+create("UIListLayout", {
+Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder,
+}, content)
+
+local refreshers = {}
+local animations = {}
+local animationEnds = {}
+local animationGoals = {}
+local dropdowns = {}
+local expanded = nil
+local dragging = false
+local rangeInput = nil
+local minimized = false
+local activeTab = "GK"
+local settingsBusy = false
+local editingField = nil
+local colorPickerOpen = false
+local closeColorPicker: (() -> ())? = nil
+
+-- Hit-test the current visible panel rather than hover state: the global
+-- InputBegan observer may run before a control's own callback.
+S.isUIInput = function(input)
+if not S.alive or not Gui.Parent or not Gui.Enabled or not panel.Visible then return false end
+local kind = input.UserInputType
+if kind ~= Enum.UserInputType.MouseButton1 and kind ~= Enum.UserInputType.MouseButton2
+and kind ~= Enum.UserInputType.MouseButton3 and kind ~= Enum.UserInputType.Touch then return false end
+local point, position, size = input.Position, panel.AbsolutePosition, panel.AbsoluteSize
+return point.X >= position.X and point.X < position.X + size.X
+and point.Y >= position.Y and point.Y < position.Y + size.Y
 end
 
--- 4. Auto Dribble
-if MISC and MISC.SetAutoDribble then 
-    MISC.SetAutoDribble(true) 
+local function updateUIBusy()
+S.uiBusy = dragging or rangeInput ~= nil or expanded ~= nil or settingsBusy or editingField ~= nil or colorPickerOpen
 end
 
-print("[Dmc] UI Disabled. Auto GK, Assist Shot, Auto Curve, and Auto Dribble are ENABLED.")
+local activeBody = nil
+local order = 0
+
+local function cancelAnimation(object)
+if animationEnds[object] then animationEnds[object]:Disconnect() end
+animationEnds[object] = nil
+if animations[object] then animations[object]:Cancel() end
+animations[object] = nil
+animationGoals[object] = nil
+end
+
+local function animate(object, goals, immediate, duration, onComplete)
+cancelAnimation(object)
+trackTheme(object, goals)
+if immediate then
+for k, v in pairs(goals) do object[k] = v end
+if onComplete then onComplete() end
+return
+end
+local tween = TweenService:Create(object,
+TweenInfo.new(duration or 0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), goals)
+animations[object] = tween
+animationGoals[object] = goals
+animationEnds[object] = tween.Completed:Connect(function(playbackState)
+-- Cancellation also fires Completed; only the current finished tween owns this callback.
+if animations[object] ~= tween then return end
+local connection = animationEnds[object]
+if connection then connection:Disconnect() end
+animationEnds[object] = nil
+animations[object] = nil
+animationGoals[object] = nil
+if playbackState == Enum.PlaybackState.Completed and S.alive then
+for property, key in pairs(themeBindings[object] or {}) do
+if goals[property] ~= nil then object[property] = C[key] end
+end
+end
+if playbackState == Enum.PlaybackState.Completed and S.alive and onComplete then
+onComplete()
+end
+end)
+tween:Play()
+end
+
+S.cancelUITweens = function()
+for object in pairs(animations) do
+cancelAnimation(object)
+end
+end
+
+local function hover(object, baseColor)
+local hovered, held, previous = false, nil, nil
+local function draw(immediate)
+local color = held and C.pressed or hovered and C.hover
+or (baseColor and baseColor() or C.control)
+if color == previous then return end
+previous = color
+animate(object, { BackgroundColor3 = color }, immediate, held and 0.07 or 0.14)
+end
+local function reset()
+hovered, held = false, nil
+if S.alive then draw(false) end
+end
+connect(object.MouseEnter, function()
+if not S.alive then return end
+hovered = true
+draw(false)
+end)
+connect(object.MouseLeave, reset)
+connect(object.InputBegan, function(input)
+if not S.alive or object.Interactable == false then return end
+if input.UserInputType == Enum.UserInputType.MouseButton1
+or input.UserInputType == Enum.UserInputType.Touch then
+held = input
+draw(false)
+end
+end)
+connect(UserInputService.InputEnded, function(input)
+if not S.alive or not held then return end
+if input == held or (held.UserInputType == Enum.UserInputType.MouseButton1
+and input.UserInputType == Enum.UserInputType.MouseButton1) then
+held = nil
+draw(false)
+end
+end)
+connect(UserInputService.WindowFocusReleased, reset)
+draw(true)
+return draw, reset
+end
+
+hover(minimize)
+hover(unload)
+
+local function closeDropdown(immediate)
+rangeInput = nil
+local previous = expanded
+expanded = nil
+if immediate then
+for _, entry in ipairs(dropdowns) do entry.setOpen(false, true) end
+elseif previous then
+previous.setOpen(false, false)
+end
+if editingField then
+local field = editingField
+editingField = nil
+field:ReleaseFocus()
+end
+local closePicker = closeColorPicker
+if closePicker then closePicker() end
+updateUIBusy()
+end
+S.closeDropdown = function() closeDropdown(true) end
+
+local function inside(point, object)
+local p, size = object.AbsolutePosition, object.AbsoluteSize
+return point.X >= p.X and point.X <= p.X + size.X
+and point.Y >= p.Y and point.Y <= p.Y + size.Y
+end
+
+local function section(name)
+local card = frame(content, name, 0, 0, 0, 22)
+card.Size = UDim2.new(1, -4, 0, 22)
+card.BackgroundTransparency = 1
+card.AutomaticSize = Enum.AutomaticSize.Y
+card.LayoutOrder = name == "AUTOMATION" and 1 or 2
+text(card, name, 9, {
+Position = UDim2.fromOffset(0, 0), Size = UDim2.new(1, 0, 0, 16),
+Font = Enum.Font.FredokaOne, TextColor3 = C.muted,
+})
+activeBody = frame(card, "Options", 0, 22, 0, 0)
+activeBody.Size = UDim2.new(1, 0, 0, 0)
+activeBody.BackgroundTransparency = 1
+activeBody.AutomaticSize = Enum.AutomaticSize.Y
+create("UIListLayout", {
+Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder,
+}, activeBody)
+order = 0
+end
+
+local function toggle(label, getter, setter)
+order = order + 1
+local control = button(activeBody, {
+Name = label, Size = UDim2.new(1, 0, 0, 32), LayoutOrder = order,
+})
+text(control, label, 11, {
+Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -82, 1, 0),
+})
+local state = text(control, "", 9, {
+Name = "Value", Position = UDim2.new(1, -69, 0, 0),
+Size = UDim2.fromOffset(30, 32), TextXAlignment = Enum.TextXAlignment.Right,
+})
+-- One solid square owns the fill; no rounded mask or inset layer leaves dark corner cutouts.
+local box = frame(control, "Checkbox", 0, 7, 18, 18, C.control)
+box.Position = UDim2.new(1, -30, 0, 7)
+local border = stroke(box, C.accentDim)
+local check = frame(box, "Check", 0, 0, 18, 18)
+check.BackgroundTransparency = 1
+local short = frame(check, "Short", 3, 9, 6, 2, C.background)
+short.Rotation = 45
+local long = frame(check, "Long", 6, 7, 9, 2, C.background)
+long.Rotation = -45
+local previous = nil
+local function refresh(immediate)
+local enabled = getter() == true
+if enabled == previous then return end
+previous = enabled
+state.Text = enabled and "ON" or "OFF"
+border.Transparency = enabled and 1 or 0
+animate(state, { TextColor3 = enabled and C.accent or C.muted }, immediate)
+animate(short, { BackgroundTransparency = enabled and 0 or 1 }, immediate)
+animate(long, { BackgroundTransparency = enabled and 0 or 1 }, immediate)
+animate(box, { BackgroundColor3 = enabled and C.accent or C.control }, immediate)
+end
+hover(control)
+connect(control.Activated, function()
+if not S.alive then return end
+closeDropdown()
+setter(not getter())
+refresh(false)
+end)
+refresh(true)
+table.insert(refreshers, function() refresh(false) end)
+return refresh
+end
+
+local function dropdown(label, choices, getter, setter)
+order = order + 1
+local body = activeBody
+local row = frame(body, label, 0, 0, 0, 34)
+row.BackgroundTransparency = 1
+row.Size = UDim2.new(1, 0, 0, 34)
+row.LayoutOrder = order
+row.ClipsDescendants = true
+text(row, label, 11, {
+Position = UDim2.fromOffset(12, 0), Size = UDim2.fromOffset(110, 34),
+TextColor3 = C.muted,
+})
+local selectButton = button(row, {
+Name = "Select", Position = UDim2.fromOffset(128, 2),
+Size = UDim2.new(1, -128, 0, 30),
+})
+stroke(selectButton)
+local selected = text(selectButton, "", 11, {
+Name = "SelectedValue", Position = UDim2.fromOffset(12, 0),
+Size = UDim2.new(1, -45, 1, 0),
+})
+local arrow = chevron(selectButton, "Arrow", 0, 8)
+arrow.Position = UDim2.new(1, -28, 0, 8)
+local menuHeight = #choices * 32 - 4
+local menu = frame(row, "Choices", 0, 38, 0, menuHeight)
+menu.Size = UDim2.new(1, 0, 0, menuHeight)
+menu.BackgroundTransparency = 1
+menu.Visible = false
+create("UIListLayout", {
+Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder,
+}, menu)
+local entry = { row = row, menu = menu, arrow = arrow, body = body, open = false }
+local items = {}
+entry.setOpen = function(open, immediate)
+entry.open = open
+if open then menu.Visible = true end
+for _, item in ipairs(items) do
+item.button.Interactable = open
+item.marker.Visible = getter() == item.value
+if not open then item.reset() end
+end
+animate(arrow, { Rotation = open and 180 or 0 }, immediate, 0.18)
+animate(row, { Size = UDim2.new(1, 0, 0, open and (42 + menuHeight) or 34) },
+immediate, open and 0.18 or 0.14, function()
+if not entry.open then
+menu.Visible = false
+-- The parent scroll surface retains its position as the row closes.
+end
+end)
+end
+table.insert(dropdowns, entry)
+local previousValue, selectionInitialized = nil, false
+local function refresh(immediate)
+local value = getter()
+if selectionInitialized and value == previousValue then return end
+previousValue, selectionInitialized = value, true
+for _, item in ipairs(items) do
+local active = value == item.value
+if active then selected.Text = item.label end
+item.text.Text = item.label
+item.marker.Visible = active
+setThemed(item.text, "TextColor3", active and C.accent or C.text)
+item.repaint(immediate)
+end
+end
+for index, choice in ipairs(choices) do
+local option = button(menu, {
+Name = choice.value, TextXAlignment = Enum.TextXAlignment.Left,
+Size = UDim2.new(1, 0, 0, 28), LayoutOrder = index,
+Interactable = false,
+})
+local optionText = text(option, choice.label, 11, {
+Name = "Label", Position = UDim2.fromOffset(34, 0), Size = UDim2.new(1, -44, 1, 0),
+TextTruncate = Enum.TextTruncate.AtEnd,
+})
+local marker = chevron(option, "SelectedChevron", 10, 7)
+marker.Rotation = -90
+local repaint, reset = hover(option, function()
+return getter() == choice.value and C.active or C.control
+end)
+table.insert(items, {
+button = option, text = optionText, marker = marker, value = choice.value, label = choice.label,
+repaint = repaint, reset = reset,
+})
+connect(option.Activated, function()
+if not S.alive or expanded ~= entry then return end
+setter(choice.value)
+refresh()
+closeDropdown()
+end)
+end
+hover(selectButton)
+connect(selectButton.Activated, function()
+if not S.alive then return end
+local wasOpen = expanded == entry
+closeDropdown(not wasOpen)
+if not wasOpen then
+expanded = entry
+S.uiBusy = true
+entry.setOpen(true, false)
+invalidateFrame(true)
+end
+end)
+refresh(true)
+table.insert(refreshers, refresh)
+end
+
+-- Existing settings and their original setters are inserted here verbatim.
+section("AUTOMATION")
+toggle(
+"Auto save",
+function()
+return ENV.AUTO_GK_ENABLED
+end,
+toggleEnabled
+)
+toggle(
+"Close-range rush",
+function()
+return Config.CloseRangeRush
+end,
+function(value)
+Config.CloseRangeRush = value
+Rush.candidate = nil
+end
+)
+toggle(
+"High-ball jumps",
+function()
+return Config.HighBallJumps
+end,
+function(value)
+Config.HighBallJumps = value
+end
+)
+toggle(
+"Jump then dive",
+function()
+return Config.JumpThenDive
+end,
+function(value)
+Config.JumpThenDive = value
+end
+)
+dropdown(
+"Dive direction",
+{
+{ value = "SMART", label = "Smart" },
+{ value = "FORWARD", label = "Forward" },
+{ value = "LEFT", label = "Left" },
+{ value = "RIGHT", label = "Right" },
+{ value = "SIDES", label = "Sides" },
+},
+function()
+return Config.DiveFilter == "ALL"
+and "SMART"
+or Config.DiveFilter
+end,
+function(value)
+Config.DiveFilter = value
+end
+)
+toggle(
+"Lob / back recovery",
+function()
+return Config.BackwardRecovery
+end,
+function(value)
+Config.BackwardRecovery = value
+end
+)
+toggle(
+"Legit prediction",
+function()
+return Config.LegitPrediction
+end,
+function(value)
+Config.LegitPrediction = value
+end
+)
+
+section("POSITIONING")
+toggle(
+"Position assist",
+function()
+return Config.PositionAssist
+end,
+function(value)
+Config.PositionAssist = value
+if not value then
+invalidateFrame(true)
+end
+end
+)
+toggle(
+"Pre-shot coverage",
+function()
+return Config.PreShotCoverage
+end,
+function(value)
+Config.PreShotCoverage = value
+invalidateFrame(true)
+end
+)
+dropdown(
+"Position mode",
+{
+{ value = "THREATS", label = "Threats only" },
+{
+value = "HOME_AND_THREATS",
+label = "Home + threats",
+},
+},
+function()
+return Config.PositionMode
+end,
+function(value)
+Config.PositionMode = value
+invalidateFrame(true)
+end
+)
+toggle(
+"Manual movement first",
+function()
+return Config.RespectManualMovement
+end,
+function(value)
+Config.RespectManualMovement = value
+end
+)
+
+local gkRefresherCount = #refreshers
+
+local shootingSection = frame(strikerContent, "Shooting", 0, 0, 292, 179)
+shootingSection.BackgroundTransparency = 1
+text(shootingSection, "SHOOTING", 9, {
+Position = UDim2.fromOffset(0, 0), Size = UDim2.fromOffset(292, 16),
+Font = Enum.Font.FredokaOne, TextColor3 = C.muted,
+})
+activeBody = frame(shootingSection, "Options", 0, 22, 292, 157)
+activeBody.BackgroundTransparency = 1
+create("UIListLayout", {
+Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder,
+}, activeBody)
+order = 0
+
+toggle("Best shot assist", function() return STR.Enabled end, STR.SetEnabled)
+toggle("Auto curve ball", function() return STR.AutoCurve end, STR.SetAutoCurve)
+toggle("Smart shot release", function() return STR.SmartRelease end, STR.SetSmartRelease)
+
+do
+order += 1
+local row = frame(activeBody, "ShotRange", 0, 0, 292, 49, C.control)
+row.Size = UDim2.new(1, 0, 0, 49)
+row.LayoutOrder = order
+text(row, "Shot range  40–100", 10, {
+Position = UDim2.fromOffset(12, 0), Size = UDim2.fromOffset(174, 24),
+})
+local value = text(row, "", 10, {
+Name = "Value", Position = UDim2.new(1, -92, 0, 0),
+Size = UDim2.fromOffset(80, 24), TextXAlignment = Enum.TextXAlignment.Right,
+TextColor3 = C.accent,
+})
+local handle = button(row, {
+Name = "RangeInput", Position = UDim2.fromOffset(12, 23),
+Size = UDim2.new(1, -24, 0, 24), BackgroundTransparency = 1, Text = "",
+})
+local track = round(frame(handle, "Track", 7, 10, 0, 4, C.accentDim), 2)
+track.Size = UDim2.new(1, -14, 0, 4)
+local fill = round(frame(track, "Fill", 0, 0, 0, 4, C.accent), 2)
+local knob = round(frame(track, "Knob", 0, -5, 14, 14, C.accent), 7)
+knob.AnchorPoint = Vector2.new(0.5, 0)
+local previous
+local function drawRange()
+local range = STR.GetAssistRange()
+if range == previous then return end
+previous = range
+local alpha = (range - 40) / 60
+value.Text = tostring(range) .. " studs"
+fill.Size = UDim2.new(alpha, 0, 1, 0)
+knob.Position = UDim2.new(alpha, 0, 0, -5)
+end
+local function setFromPoint(point)
+local width = track.AbsoluteSize.X
+if width <= 0 then return end
+local alpha = math.clamp((point.X - track.AbsolutePosition.X) / width, 0, 1)
+STR.SetAssistRange(40 + alpha * 60)
+drawRange()
+end
+connect(handle.InputBegan, function(input)
+if not S.alive or not Gui.Enabled or minimized or activeTab ~= "STR" or dragging or rangeInput then return end
+if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+closeDropdown(true)
+rangeInput = input
+S.uiBusy = true
+setFromPoint(input.Position)
+end
+end)
+connect(UserInputService.InputChanged, function(input)
+if not S.alive or not rangeInput then return end
+if input == rangeInput or (rangeInput.UserInputType == Enum.UserInputType.MouseButton1
+and input.UserInputType == Enum.UserInputType.MouseMovement) then setFromPoint(input.Position) end
+end)
+connect(UserInputService.InputEnded, function(input)
+if rangeInput and (input == rangeInput or (rangeInput.UserInputType == Enum.UserInputType.MouseButton1
+and input.UserInputType == Enum.UserInputType.MouseButton1)) then
+rangeInput = nil
+updateUIBusy()
+end
+end)
+drawRange()
+table.insert(refreshers, drawRange)
+end
+
+local miscellaneousSection = frame(strikerContent, "Miscellaneous", 0, 193, 292, 54)
+miscellaneousSection.BackgroundTransparency = 1
+text(miscellaneousSection, "MISCELLANEOUS", 9, {
+Position = UDim2.fromOffset(0, 0), Size = UDim2.fromOffset(292, 16),
+Font = Enum.Font.FredokaOne, TextColor3 = C.muted,
+})
+activeBody = frame(miscellaneousSection, "Options", 0, 22, 292, 32)
+activeBody.BackgroundTransparency = 1
+create("UIListLayout", {
+Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder,
+}, activeBody)
+order = 0
+
+toggle("Auto dribble", function() return MISC.AutoDribble end, MISC.SetAutoDribble)
+
+local strikerStatus = text(strikerContent, "OFF", 11, {
+Name = "StrikerStatus", Position = UDim2.fromOffset(8, 257),
+Size = UDim2.fromOffset(276, 30), TextWrapped = true,
+Font = Enum.Font.FredokaOne, TextColor3 = C.accent,
+})
+local miscellaneousStatus = text(strikerContent, "", 9, {
+Name = "MiscStatus", Position = UDim2.fromOffset(8, 291), Size = UDim2.fromOffset(276, 28),
+TextWrapped = true, TextColor3 = C.muted,
+})
+
+local fit
+local settingsContent
+do
+settingsContent = create("ScrollingFrame", {
+Name = "SettingsContent", Position = UDim2.fromOffset(12, 76),
+Size = UDim2.fromOffset(292, 296), BackgroundTransparency = 1,
+BorderSizePixel = 0, ClipsDescendants = true, Visible = false,
+ScrollingDirection = Enum.ScrollingDirection.Y,
+ScrollBarThickness = 2, ScrollBarImageColor3 = C.accentDim,
+CanvasSize = UDim2.fromOffset(0, 335),
+}, panel)
+
+-- The saved accent stays static; only the displayed palette cycles.
+local currentAccent = SettingsStore.Accent
+local rainbowUI = SettingsStore.RainbowUI == true
+local rainbowHue, rainbowElapsed = 0, 0
+local refreshColorUI, refreshRainbowToggle
+local cyclingKeys = { accent = true, accentDim = true, active = true,
+hover = true, pressed = true, stroke = true }
+local function rainbowAccent()
+local color = Color3.fromHSV(rainbowHue, 0.68, 1)
+return string.format("%02X%02X%02X", math.floor(color.R * 255 + 0.5),
+math.floor(color.G * 255 + 0.5), math.floor(color.B * 255 + 0.5))
+end
+local function repaintPalette(hex, settleColors)
+setPalette(hex)
+if settleColors then
+-- Color-only hover tweens may end at an older hue. Size and arrow
+-- animations keep running when the rainbow switch changes.
+for object, goals in pairs(animationGoals) do
+local bindings, colorOnly = themeBindings[object] or {}, true
+for property in pairs(goals) do
+if not bindings[property] then colorOnly = false; break end
+end
+if colorOnly then cancelAnimation(object) end
+end
+end
+for object, properties in pairs(themeBindings) do
+if object.Parent then
+local goals = animationGoals[object]
+for property, key in pairs(properties) do
+if cyclingKeys[key] and not (goals and goals[property] ~= nil)
+and object[property] ~= C[key] then object[property] = C[key] end
+end
+end
+end
+end
+local function setRainbowUI(value)
+rainbowUI = value == true
+rainbowElapsed = 0
+repaintPalette(rainbowUI and not colorPickerOpen and rainbowAccent() or currentAccent, true)
+if refreshRainbowToggle then refreshRainbowToggle(false) end
+end
+local function applyTheme(hex)
+currentAccent = hex
+for object, goals in pairs(animationGoals) do
+for property, value in pairs(goals) do object[property] = value end
+end
+S.cancelUITweens()
+repaintPalette(rainbowUI and not colorPickerOpen and rainbowAccent() or hex, false)
+if refreshColorUI then refreshColorUI() end
+end
+applyTheme(currentAccent)
+connect(RunService.Heartbeat, function(dt)
+if not S.alive or not rainbowUI or not Gui.Parent or not Gui.Enabled
+or minimized or S.focused == false or colorPickerOpen then return end
+rainbowHue = (rainbowHue + dt / 12) % 1
+rainbowElapsed += dt
+if rainbowElapsed < 1 / 30 then return end
+rainbowElapsed %= 1 / 30
+repaintPalette(rainbowAccent(), false)
+end)
+
+local settingsController = createDmcSettingsController({
+config = Config, striker = STR, misc = MISC,
+gkEnabled = function() return ENV.AUTO_GK_ENABLED == true end,
+setGK = toggleEnabled, validate = SettingsStore.Validate,
+accent = function() return currentAccent end, theme = applyTheme,
+rainbow = function() return rainbowUI end, setRainbow = setRainbowUI,
+resetGoalkeeper = function() Rush.candidate = nil; invalidateFrame(true); S.nextPlanAt = 0 end,
+})
+
+local configCard = frame(settingsContent, "Configs", 0, 0, 288, 196)
+configCard.BackgroundTransparency = 1
+text(configCard, "CONFIGS", 9, {
+Size = UDim2.fromOffset(288, 16), Font = Enum.Font.FredokaOne, TextColor3 = C.muted,
+})
+local function field(parent, name, value, placeholder, x, y, w)
+local box = round(create("TextBox", {
+Name = name, Text = value, PlaceholderText = placeholder,
+Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, 32),
+TextSize = 14, Font = Enum.Font.Nunito, TextColor3 = C.text,
+PlaceholderColor3 = C.muted, BackgroundColor3 = C.control,
+BorderSizePixel = 0, ClearTextOnFocus = false, TextEditable = true,
+TextXAlignment = Enum.TextXAlignment.Left,
+}, parent), 5)
+create("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) }, box)
+stroke(box)
+connect(box.Focused, function()
+if not S.alive then return end
+editingField = box
+updateUIBusy()
+end)
+connect(box.FocusLost, function()
+if editingField == box then editingField = nil end
+updateUIBusy()
+end)
+return box
+end
+local configName = field(configCard, "ConfigName", "", "New config name", 0, 22, 288)
+text(configCard, "SAVED CONFIGS", 9, {
+Name = "SavedConfigsHeading", Position = UDim2.fromOffset(0, 106), Size = UDim2.fromOffset(288, 16), TextColor3 = C.muted,
+})
+local function action(name, x)
+local control = button(configCard, {
+Name = name, Text = name, Position = UDim2.fromOffset(x, 64), Size = UDim2.fromOffset(92, 32),
+})
+hover(control)
+return control
+end
+local createConfig, saveConfig, loadConfig = action("Create", 0), action("Save", 98), action("Load", 196)
+local configMessage = text(configCard, SettingsStore.Notice, 10, {
+Name = "ConfigMessage", Position = UDim2.fromOffset(0, 168), Size = UDim2.fromOffset(288, 28),
+TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top, TextColor3 = C.muted,
+})
+
+local colorCard = frame(settingsContent, "Appearance", 0, 212, 288, 93)
+colorCard.BackgroundTransparency = 1
+text(colorCard, "UI COLOR", 9, {
+Size = UDim2.fromOffset(288, 16), Font = Enum.Font.FredokaOne, TextColor3 = C.muted,
+})
+local rainbowOptions = frame(colorCard, "Options", 0, 22, 288, 32)
+rainbowOptions.BackgroundTransparency = 1
+local previousBody, previousOrder = activeBody, order
+activeBody, order = rainbowOptions, 0
+refreshRainbowToggle = toggle("Rainbow UI", function() return rainbowUI end, function(value)
+if settingsBusy then return end
+local ok, detail = SettingsStore.SetRainbowUI(value)
+if ok then setRainbowUI(value)
+else configMessage.Text = detail; setThemed(configMessage, "TextColor3", C.accent) end
+end)
+activeBody, order = previousBody, previousOrder
+local openColor = button(colorCard, {
+Name = "ChangeColor", Text = "Change UI color", TextXAlignment = Enum.TextXAlignment.Left,
+Position = UDim2.fromOffset(0, 57), Size = UDim2.fromOffset(288, 36),
+})
+create("UIPadding", { PaddingLeft = UDim.new(0, 12) }, openColor)
+local swatch = round(frame(openColor, "Swatch", 0, 7, 22, 22, C.accent), 4)
+swatch.Position = UDim2.new(1, -34, 0, 7)
+hover(openColor)
+
+local configExtra, colorExtra = 0, 0
+local function layoutSettings(immediate, duration, scrollToColor)
+if fit then fit() end
+animate(configCard, { Size = UDim2.fromOffset(288, 196 + configExtra) }, immediate, duration)
+animate(configMessage, { Position = UDim2.fromOffset(0, 168 + configExtra) }, immediate, duration)
+animate(colorCard, { Position = UDim2.fromOffset(0, 212 + configExtra),
+Size = UDim2.fromOffset(288, 93 + colorExtra) }, immediate, duration)
+local canvas = { CanvasSize = UDim2.fromOffset(0, 335 + configExtra + colorExtra) }
+if scrollToColor then canvas.CanvasPosition = Vector2.new(0, 212 + configExtra)
+elseif configExtra == 0 and colorExtra == 0 then canvas.CanvasPosition = Vector2.zero end
+animate(settingsContent, canvas, immediate, duration)
+end
+
+local updateSettingsList
+local function buildConfigDropdown()
+local row = frame(configCard, "SavedConfigs", 0, 128, 288, 30)
+row.BackgroundTransparency, row.ClipsDescendants = 1, true
+local selectButton = button(row, { Name = "Select", Size = UDim2.fromOffset(288, 30) })
+stroke(selectButton)
+local selected = text(selectButton, "No saved configs", 11, {
+Name = "SelectedValue", Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -48, 1, 0),
+TextTruncate = Enum.TextTruncate.AtEnd,
+})
+local arrow = chevron(selectButton, "Arrow", 0, 8)
+arrow.Position = UDim2.new(1, -28, 0, 8)
+local menu = create("ScrollingFrame", {
+Name = "Choices", Position = UDim2.fromOffset(0, 36), Size = UDim2.fromOffset(288, 0),
+BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false, ClipsDescendants = true,
+ScrollingDirection = Enum.ScrollingDirection.Y, ScrollBarThickness = 2,
+ScrollBarImageColor3 = C.accentDim, CanvasSize = UDim2.fromOffset(0, 0),
+}, row)
+create("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, menu)
+local entry = { row = row, menu = menu, arrow = arrow, open = false }
+local options, menuHeight, count = {}, 0, 0
+entry.setOpen = function(open, immediate)
+entry.open = open and count > 0
+configExtra = entry.open and menuHeight + 8 or 0
+if entry.open then menu.Visible = true end
+for _, option in pairs(options) do
+option.button.Interactable = entry.open
+option.marker.Visible = SettingsStore.Selected == option.button.Name
+if not entry.open then option.reset() end
+end
+animate(arrow, { Rotation = entry.open and 180 or 0 }, immediate, 0.18)
+local duration = entry.open and 0.18 or 0.14
+animate(row, { Size = UDim2.fromOffset(288, 30 + configExtra) }, immediate, duration, function()
+if not entry.open then menu.Visible = false end
+end)
+layoutSettings(immediate, duration)
+end
+table.insert(dropdowns, entry)
+entry.Refresh = function(names)
+count = #names
+selected.Text = count > 0 and SettingsStore.Selected or "No saved configs"
+selectButton.Interactable = count > 0 and not settingsBusy
+menuHeight = math.min(156, math.max(0, count * 32 - 4))
+menu.Size, menu.CanvasSize = UDim2.fromOffset(288, menuHeight), UDim2.fromOffset(0, math.max(0, count * 32 - 4))
+for index, name in ipairs(names) do
+local option = options[name]
+if not option then
+local control = button(menu, {
+Name = name, Text = "", TextXAlignment = Enum.TextXAlignment.Left,
+TextTruncate = Enum.TextTruncate.AtEnd, Size = UDim2.new(1, -4, 0, 28), Interactable = false,
+})
+local label = text(control, name, 11, {
+Name = "Label", Position = UDim2.fromOffset(34, 0), Size = UDim2.new(1, -44, 1, 0),
+TextTruncate = Enum.TextTruncate.AtEnd,
+})
+local marker = chevron(control, "SelectedChevron", 10, 7)
+marker.Rotation = -90
+local repaint, reset = hover(control, function()
+return SettingsStore.Selected == name and C.active or C.control
+end)
+option = { button = control, text = label, marker = marker, repaint = repaint, reset = reset }
+options[name] = option
+connect(control.Activated, function()
+if not S.alive or settingsBusy or expanded ~= entry or not entry.open then return end
+SettingsStore.Select(name)
+updateSettingsList()
+closeDropdown()
+end)
+end
+option.button.LayoutOrder, option.button.Interactable = index, entry.open
+option.marker.Visible = SettingsStore.Selected == name
+setThemed(option.text, "TextColor3", SettingsStore.Selected == name and C.accent or C.text)
+option.repaint(true)
+end
+end
+hover(selectButton)
+connect(selectButton.Activated, function()
+if not S.alive or settingsBusy or count == 0 then return end
+local wasOpen = expanded == entry
+closeDropdown(not wasOpen)
+if not wasOpen then
+expanded = entry
+entry.setOpen(true, false)
+updateUIBusy()
+end
+end)
+return entry
+end
+local configDropdown = buildConfigDropdown()
+updateSettingsList = function()
+local names = SettingsStore.List()
+local selected = table.find(names, SettingsStore.Selected)
+if not selected and #names > 0 then SettingsStore.Select(names[1]); selected = 1 end
+configDropdown.Refresh(names)
+saveConfig.Interactable, loadConfig.Interactable = selected ~= nil and not settingsBusy, selected ~= nil and not settingsBusy
+createConfig.Interactable = not settingsBusy
+end
+local function settingsAction(callback)
+if not S.alive or settingsBusy then return end
+closeDropdown(true)
+settingsBusy = true
+updateUIBusy()
+updateSettingsList()
+local called, ok, detail = pcall(callback)
+settingsBusy = false
+updateUIBusy()
+if not S.alive then return end
+configMessage.Text = called and tostring(detail) or ("Settings error: " .. tostring(ok))
+setThemed(configMessage, "TextColor3", called and ok and C.muted or C.accent)
+updateSettingsList()
+end
+connect(createConfig.Activated, function()
+settingsAction(function()
+local ok, detail = SettingsStore.Save(configName.Text, settingsController.Snapshot(), true)
+if ok then configName.Text = "" end
+return ok, ok and (SettingsStore.Storage:sub(1, 10) == "Local file" and "Created." or "Created for this session.") or detail
+end)
+end)
+connect(saveConfig.Activated, function()
+settingsAction(function()
+local ok, detail = SettingsStore.Save(SettingsStore.Selected, settingsController.Snapshot(), false)
+return ok, ok and (SettingsStore.Storage:sub(1, 10) == "Local file" and "Saved." or "Saved for this session.") or detail
+end)
+end)
+connect(loadConfig.Activated, function()
+settingsAction(function()
+local profile = SettingsStore.Get(SettingsStore.Selected)
+if not profile then return false, "Select a saved config first." end
+local ok, detail = settingsController.Load(profile)
+if not ok then return false, detail end
+SettingsStore.SetAppearance(profile.accent, profile.rainbowUI == true)
+return true, "Loaded."
+end)
+end)
+
+-- The spectrum expands inside Settings and previews without writing storage.
+local function buildColorPicker()
+local body = round(frame(colorCard, "ColorPicker", 0, 103, 288, 0, C.surface), 5)
+body.Visible, body.ClipsDescendants = false, true
+local spectrum = button(body, {
+Name = "Spectrum", Position = UDim2.fromOffset(12, 12), Size = UDim2.fromOffset(224, 174),
+BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+})
+themeBindings[spectrum].BackgroundColor3 = nil
+local hueGradient = create("UIGradient", { Rotation = 0 }, spectrum)
+local saturation = frame(spectrum, "SaturationFade", 0, 0, 224, 174, Color3.fromRGB(255, 255, 255))
+themeBindings[saturation].BackgroundColor3 = nil
+create("UIGradient", {
+Rotation = 90, Transparency = NumberSequence.new({
+NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0),
+}),
+}, saturation)
+local cursor = frame(spectrum, "Cursor", 0, 0, 16, 16)
+cursor.BackgroundTransparency, cursor.AnchorPoint = 1, Vector2.new(0.5, 0.5)
+local cursorH = frame(cursor, "Horizontal", 0, 7, 16, 2, Color3.fromRGB(0, 0, 0))
+local cursorV = frame(cursor, "Vertical", 7, 0, 2, 16, Color3.fromRGB(0, 0, 0))
+themeBindings[cursorH].BackgroundColor3, themeBindings[cursorV].BackgroundColor3 = nil, nil
+local brightness = button(body, {
+Name = "Brightness", Position = UDim2.fromOffset(250, 12), Size = UDim2.fromOffset(14, 174),
+BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+})
+themeBindings[brightness].BackgroundColor3 = nil
+local brightnessGradient = create("UIGradient", { Rotation = 90 }, brightness)
+local valueMarker = frame(brightness, "Marker", 0, 0, 22, 3, Color3.fromRGB(255, 255, 255))
+themeBindings[valueMarker].BackgroundColor3 = nil
+valueMarker.AnchorPoint = Vector2.new(0.5, 0.5)
+local patch = round(frame(body, "Preview", 12, 198, 62, 86, C.accent), 3)
+themeBindings[patch].BackgroundColor3 = nil
+local values: { [string]: TextBox } = {}
+local h, s, v, updatingHSV = 0, 0, 0, false
+local colorOriginal, colorDrag, dragSurface = nil, nil, nil
+local function rgb(hex)
+return { tonumber(hex:sub(1, 2), 16), tonumber(hex:sub(3, 4), 16), tonumber(hex:sub(5, 6), 16) }
+end
+local function readHSV(hex)
+local channels = rgb(hex)
+h, s, v = Color3.fromRGB(channels[1], channels[2], channels[3]):ToHSV()
+end
+local function draw()
+local channels = rgb(currentAccent)
+patch.BackgroundColor3 = Color3.fromRGB(channels[1], channels[2], channels[3])
+cursor.Position = UDim2.fromScale(1 - h, 1 - s)
+valueMarker.Position = UDim2.fromScale(0.5, 1 - v)
+local points = {}
+for index = 0, 6 do
+points[#points + 1] = ColorSequenceKeypoint.new(index / 6, Color3.fromHSV(1 - index / 6, 1, v))
+end
+hueGradient.Color = ColorSequence.new(points)
+saturation.BackgroundColor3 = Color3.fromHSV(0, 0, v)
+brightnessGradient.Color = ColorSequence.new(Color3.fromHSV(h, s, 1), Color3.fromRGB(0, 0, 0))
+local luminance = channels[1] * 0.299 + channels[2] * 0.587 + channels[3] * 0.114
+local cursorColor = luminance > 145 and Color3.fromRGB(0, 0, 0) or Color3.fromRGB(255, 255, 255)
+cursorH.BackgroundColor3, cursorV.BackgroundColor3 = cursorColor, cursorColor
+local numbers = { Hue = math.floor(h * 360 + 0.5), Saturation = math.floor(s * 100 + 0.5),
+Value = math.floor(v * 100 + 0.5), Red = channels[1], Green = channels[2], Blue = channels[3] }
+for key, number in pairs(numbers) do
+if values[key] then values[key].Text = tostring(number) end
+end
+if values.Hex then values.Hex.Text = "#" .. currentAccent end
+end
+refreshColorUI = function()
+if not updatingHSV then readHSV(currentAccent) end
+draw()
+end
+local function setHSV(hue, sat, value)
+h, s, v = math.clamp(hue, 0, 1), math.clamp(sat, 0, 1), math.clamp(value, 0, 1)
+local color = Color3.fromHSV(h, s, v)
+local hex = string.format("%02X%02X%02X", math.floor(color.R * 255 + 0.5),
+math.floor(color.G * 255 + 0.5), math.floor(color.B * 255 + 0.5))
+-- Preserve the chosen hue through grey/black and RGB rounding.
+updatingHSV = true
+if hex ~= currentAccent then applyTheme(hex) else draw() end
+updatingHSV = false
+end
+for index, key in ipairs({ "Hue", "Saturation", "Value", "Red", "Green", "Blue" }) do
+local hsv = index <= 3
+local row = (index - 1) % 3
+text(body, ({ "Hue", "Sat %", "Val %", "R", "G", "B" })[index], 10, {
+Position = UDim2.fromOffset(hsv and 82 or 180, 194 + row * 30),
+Size = UDim2.fromOffset(hsv and 36 or 24, 26), TextColor3 = C.muted,
+})
+local input = field(body, key, "", "0", hsv and 120 or 212, 194 + row * 30, hsv and 44 or 64)
+input.Size = UDim2.fromOffset(hsv and 44 or 64, 26)
+values[key] = input
+connect(input.FocusLost, function()
+if not colorPickerOpen or not S.alive then return end
+local number = tonumber(input.Text)
+if not number or number ~= number or math.abs(number) == math.huge then draw(); return end
+if hsv then
+if key == "Hue" then setHSV(math.clamp(number, 0, 360) / 360, s, v)
+elseif key == "Saturation" then setHSV(h, math.clamp(number, 0, 100) / 100, v)
+else setHSV(h, s, math.clamp(number, 0, 100) / 100) end
+else
+local channels = rgb(currentAccent)
+channels[index - 3] = math.clamp(math.floor(number + 0.5), 0, 255)
+local hex = string.format("%02X%02X%02X", channels[1], channels[2], channels[3])
+if hex ~= currentAccent then applyTheme(hex) else draw() end
+end
+end)
+end
+text(body, "HTML", 10, {
+Position = UDim2.fromOffset(12, 294), Size = UDim2.fromOffset(62, 28), TextColor3 = C.muted,
+})
+values.Hex = field(body, "Hex", "", "#DEC173", 80, 294, 196)
+values.Hex.Size, values.Hex.Font = UDim2.fromOffset(196, 28), Enum.Font.Code
+connect(values.Hex.FocusLost, function()
+if not colorPickerOpen or not S.alive then return end
+local hex = SettingsStore.Color(values.Hex.Text)
+if hex and hex ~= currentAccent then applyTheme(hex) else draw() end
+end)
+local function fromColorPoint(point)
+if dragSurface == spectrum then
+local size, position = spectrum.AbsoluteSize, spectrum.AbsolutePosition
+if size.X > 0 and size.Y > 0 then
+setHSV(1 - (point.X - position.X) / size.X, 1 - (point.Y - position.Y) / size.Y, v)
+end
+elseif dragSurface == brightness then
+local size, position = brightness.AbsoluteSize, brightness.AbsolutePosition
+if size.Y > 0 then setHSV(h, s, 1 - (point.Y - position.Y) / size.Y) end
+end
+end
+for _, surface in ipairs({ spectrum, brightness }) do
+connect(surface.InputBegan, function(input)
+if not S.alive or not colorPickerOpen or colorDrag then return end
+if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+if editingField then editingField:ReleaseFocus() end
+colorDrag, dragSurface = input, surface
+settingsContent.ScrollingEnabled = false
+fromColorPoint(input.Position)
+end
+end)
+end
+local function expandPicker(open, immediate)
+colorExtra = open and 384 or 0
+if open then body.Visible = true end
+local duration = open and 0.18 or 0.14
+animate(body, { Size = UDim2.fromOffset(288, open and 374 or 0) }, immediate, duration, function()
+if not colorPickerOpen then body.Visible = false end
+end)
+layoutSettings(immediate, duration, open)
+end
+local function dismissColorPicker(keepPreview, immediate)
+if not colorPickerOpen then return end
+if editingField then editingField:ReleaseFocus() end
+colorPickerOpen, colorDrag, dragSurface = false, nil, nil
+settingsContent.ScrollingEnabled = true
+if not keepPreview and colorOriginal then applyTheme(colorOriginal) end
+colorOriginal = nil
+repaintPalette(rainbowUI and rainbowAccent() or currentAccent, true)
+expandPicker(false, immediate)
+updateUIBusy()
+end
+closeColorPicker = function() dismissColorPicker(false, true) end
+connect(openColor.Activated, function()
+if not S.alive or settingsBusy then return end
+if colorPickerOpen then dismissColorPicker(false, false); return end
+closeDropdown(true)
+colorOriginal, colorPickerOpen = currentAccent, true
+repaintPalette(currentAccent, true)
+refreshColorUI()
+expandPicker(true, false)
+updateUIBusy()
+end)
+local cancelColor = button(body, {
+Name = "Cancel", Text = "Cancel", Position = UDim2.fromOffset(12, 334), Size = UDim2.fromOffset(126, 30),
+})
+local applyColor = button(body, {
+Name = "Apply", Text = "Apply", Position = UDim2.fromOffset(150, 334), Size = UDim2.fromOffset(126, 30),
+})
+hover(cancelColor); hover(applyColor)
+connect(cancelColor.Activated, function() dismissColorPicker(false, false) end)
+connect(applyColor.Activated, function()
+if not S.alive or not colorPickerOpen then return end
+dismissColorPicker(true, false)
+settingsAction(function()
+local ok, detail = SettingsStore.SetAccent(currentAccent)
+return ok, ok and (SettingsStore.Storage:sub(1, 10) == "Local file" and "Color applied." or "Color applied for this session.") or detail
+end)
+end)
+connect(UserInputService.InputChanged, function(input)
+if not S.alive or not colorPickerOpen or not colorDrag then return end
+if input == colorDrag or (colorDrag.UserInputType == Enum.UserInputType.MouseButton1
+and input.UserInputType == Enum.UserInputType.MouseMovement) then fromColorPoint(input.Position) end
+end)
+connect(UserInputService.InputEnded, function(input)
+if colorDrag and (input == colorDrag or (colorDrag.UserInputType == Enum.UserInputType.MouseButton1
+and input.UserInputType == Enum.UserInputType.MouseButton1)) then
+colorDrag, dragSurface = nil, nil
+settingsContent.ScrollingEnabled = true
+end
+end)
+refreshColorUI()
+end
+buildColorPicker()
+updateSettingsList()
+end
+
+local dragInput, dragStart, hostStart
+local lastViewport = nil
+local lastMinimized = nil
+local lastTab = nil
+local lastHeight = nil
+local refresh
+
+local function viewportSize()
+local camera = workspace.CurrentCamera
+return camera and camera.ViewportSize or Vector2.new(1280, 720)
+end
+
+fit = function(requestedX, requestedY)
+local viewport = viewportSize()
+local top = math.min(48, viewport.Y * 0.1)
+local width, height = 316, minimized and 40 or (activeTab == "GK" and 494 or (activeTab == "STR" and 421 or (colorPickerOpen and 581 or 419)))
+local scale = math.min(1, math.max(1, viewport.X - 32) / width,
+math.max(1, viewport.Y - top - 16) / height)
+if viewport ~= lastViewport or minimized ~= lastMinimized or activeTab ~= lastTab or height ~= lastHeight then
+uiScale.Scale = scale
+panel.Size = UDim2.fromOffset(width, height)
+tabBar.Visible = not minimized
+content.Visible = not minimized and activeTab == "GK"
+live.Visible = not minimized and activeTab == "GK"
+strikerContent.Visible = not minimized and activeTab == "STR"
+settingsContent.Visible = not minimized and activeTab == "Settings"
+lastViewport, lastMinimized, lastTab, lastHeight = viewport, minimized, activeTab, height
+settingsContent.Size = UDim2.fromOffset(292, height - 88)
+end
+local x = math.clamp(requestedX or host.Position.X.Offset, 16,
+math.max(16, viewport.X - width * scale - 16))
+local y = math.clamp(requestedY or host.Position.Y.Offset, top,
+math.max(top, viewport.Y - height * scale - 16))
+if x ~= host.Position.X.Offset or y ~= host.Position.Y.Offset then
+host.Position = UDim2.fromOffset(x, y)
+end
+end
+
+connect(minimize.Activated, function()
+if not S.alive then return end
+dragging = false
+closeDropdown(true)
+minimized = not minimized
+minimize.Text = minimized and "+" or "-"
+fit()
+if not minimized then refresh() end
+end)
+
+connect(unload.Activated, function()
+if S.alive and type(ENV.StopAutoGK) == "function" then ENV.StopAutoGK() end
+end)
+
+connect(header.InputBegan, function(input)
+if not S.alive or dragging then return end
+if input.UserInputType == Enum.UserInputType.MouseButton1
+or input.UserInputType == Enum.UserInputType.Touch then
+closeDropdown(true)
+dragging = true
+S.uiBusy = true
+dragInput, dragStart, hostStart = input, input.Position, host.Position
+invalidateFrame(true)
+end
+end)
+
+connect(UserInputService.InputEnded, function(input)
+if input == dragInput or (dragInput
+and dragInput.UserInputType == Enum.UserInputType.MouseButton1
+and input.UserInputType == Enum.UserInputType.MouseButton1) then
+dragging = false
+dragInput = nil
+updateUIBusy()
+end
+end)
+
+connect(UserInputService.InputChanged, function(input)
+if not S.alive or not dragging then return end
+if input == dragInput or (dragInput
+and dragInput.UserInputType == Enum.UserInputType.MouseButton1
+and input.UserInputType == Enum.UserInputType.MouseMovement) then
+local delta = input.Position - dragStart
+fit(hostStart.X.Offset + delta.X, hostStart.Y.Offset + delta.Y)
+end
+end)
+
+connect(UserInputService.InputBegan, function(input, processed)
+if not S.alive then return end
+if expanded and (input.UserInputType == Enum.UserInputType.MouseButton1
+or input.UserInputType == Enum.UserInputType.Touch)
+and not inside(input.Position, expanded.row) then
+closeDropdown()
+end
+if input.KeyCode == Enum.KeyCode.Escape then closeDropdown() end
+if not processed and input.KeyCode == Enum.KeyCode.RightShift then
+dragging = false
+dragInput = nil
+closeDropdown(true)
+Gui.Enabled = not Gui.Enabled
+if Gui.Enabled then refresh() end
+end
+end)
+
+connect(UserInputService.WindowFocusReleased, function()
+dragging = false
+dragInput = nil
+closeDropdown(true)
+end)
+
+local function writeChanged(object, property, value)
+if object[property] ~= value then setThemed(object, property, value) end
+end
+
+refresh = function()
+if not Gui.Enabled or not Gui.Parent then return end
+if viewportSize() ~= lastViewport then fit() end
+if minimized then return end
+if activeTab == "Settings" then return end
+if activeTab == "STR" then
+for i = gkRefresherCount + 1, #refreshers do refreshers[i]() end
+writeChanged(strikerStatus, "Text", STR.Status)
+writeChanged(miscellaneousStatus, "Text", "Dribble: " .. MISC.DribbleStatus)
+return
+end
+for i = 1, gkRefresherCount do refreshers[i]() end
+flushStatusDisplay()
+writeChanged(stateText, "Text", S.displayName)
+writeChanged(dot, "BackgroundColor3", S.wasKeeper and Config.Enabled and ENV.AUTO_GK_ENABLED
+and C.accent or C.muted)
+end
+
+local tabRefreshers = {}
+local function addTab(name, labelText, x, width)
+local control = button(tabBar, {
+Name = name, Position = UDim2.fromOffset(x, 0),
+Size = UDim2.fromOffset(width, 26),
+})
+local label = text(control, labelText, 11, {
+Name = "Label", Size = UDim2.fromScale(1, 1),
+Font = Enum.Font.FredokaOne,
+TextXAlignment = Enum.TextXAlignment.Center,
+})
+local border = stroke(control)
+local repaint = hover(control, function()
+return activeTab == name and C.active or C.control
+end)
+local function draw(immediate)
+local selected = activeTab == name
+animate(label, { TextColor3 = selected and C.accent or C.muted }, immediate)
+animate(border, { Color = selected and C.accentDim or C.stroke }, immediate)
+repaint(immediate)
+end
+table.insert(tabRefreshers, draw)
+connect(control.Activated, function()
+if not S.alive or activeTab == name then return end
+closeDropdown(true)
+activeTab = name
+for _, redraw in ipairs(tabRefreshers) do redraw(false) end
+fit()
+refresh()
+end)
+draw(true)
+end
+addTab("GK", "Goalkeeper", 0, 108)
+addTab("STR", "Striker", 114, 82)
+addTab("Settings", "Settings", 202, 90)
+
+connect(RunService.Heartbeat, function()
+if not S.alive or not Gui.Enabled or not Gui.Parent then return end
+local clock = os.clock()
+if clock < S.nextUIAt then return end
+S.nextUIAt = clock + 1 / Config.UISampleHz
+local ok, err = pcall(refresh)
+if not ok then report("UI", err) end
+end)
+refresh()
+end
+
 --==============================================================
 -- SHUTDOWN
 --==============================================================
 ENV.__AUTO_GK_CLEANUP = cleanup
 ENV.StopAutoGK = cleanup
 ENV.ToggleAutoGK = function(value)
-	toggleEnabled(
-		value == nil and not ENV.AUTO_GK_ENABLED
-		or value == true
-	)
+toggleEnabled(
+value == nil and not ENV.AUTO_GK_ENABLED
+or value == true
+)
 end
 ENV.AutoGKDebug = function()
-	print(
-		"[Auto GK] consecutive runtime failures:", S.runtimeFailures,
-		"| last runtime error:", S.runtimeError or "none"
-	)
-	print("[Auto GK] cleanup:", S.cleanupComplete == true,
-		"| last cleanup error:", S.cleanupError or "none")
-	print(
-		"[Auto GK] name:", BUILD,
-		"| alive:", S.alive,
-		"| effective enabled:",
-		S.alive and Config.Enabled and ENV.AUTO_GK_ENABLED
-	)
-	print(
-		"[Auto GK] focus:", S.focused,
-		"| UI busy:", S.uiBusy
-	)
-	print(
-		"[Auto GK] sender error:",
-		S.transportError or "none"
-	)
-	print(
-		"[Auto GK] raw:", S.status, S.detail,
-		"| display:", S.displayName
-	)
-	print(
-		"[Auto GK] actions:", Stats.Requests,
-		"| jumps:", Stats.JumpRequests,
-		"| dives:", Stats.DiveRequests,
-		"| distinct flights acted on:", Stats.FlightsActedOn
-	)
-	print(
-		"[Auto GK] pre-shot coverage:", Config.PreShotCoverage,
-		"| movement writes:", S.coverageWrites
-	)
-	print(
-		"[Auto GK] planner:", S.lastPlanReason,
-		"| immediate directions:", S.immediatePlansChecked,
-		"| delayed candidates:", S.delayedPlansChecked,
-		"| milliseconds:", S.plannerMilliseconds
-	)
-	print("[Auto GK] contact timing waits:", S.keeperWaits or 0,
-		"| deadline:", S.keeperWait and math.max(0, S.keeperWait.deadline - os.clock()) or 0,
-		"| intervening contact:", S.keeperContact and S.keeperContact.time or "none",
-		"| timing errors:", S.keeperTimingErrors or 0,
-		"| last timing error:", S.keeperTimingError or "none")
-	print(
-		"[Auto GK] close-range rush:", Config.CloseRangeRush,
-		"| requests:", Stats.RushRequests,
-		"| native controller owns rush recovery"
-	)
-	print(
-		"[Auto GK] own lock acquisitions:", S.ownLockAcquires,
-		"| releases:", S.ownLockReleases,
-		"| current lease:",
-		S.motionLease and S.motionLease.id or "none"
-	)
-	print(
-		"[Auto GK] ball:", S.ballPhase,
-		"|", S.ballInfo,
-		"| id:", S.observedBallId
-	)
-	print(
-		"[Auto GK] position:", Config.PositionMode,
-		"| allowed:", S.allowPositioning,
-		"| active:", S.positionActive,
-		"| movement writes:", S.positionWrites,
-		"| releases:", S.releaseWrites
-	)
-	print(
-		"[Auto GK] frame age:",
-		S.lastFrame and os.clock() - S.lastFrame.readClock or "none",
-		"| jump delay estimate:", S.queueEstimate
-	)
-	print(
-		"[Auto GK] HOLD:",
-		"movement stops", S.holdStops,
-		"| fresh checks", S.holdRechecks,
-		"| checks without contact", S.holdRecheckMisses,
-		"| follow-ups blocked", S.followupBlocks
-	)
-	local releaseSummary = {}
-	for name, count in pairs(S.releaseReasons) do
-		releaseSummary[#releaseSummary + 1] =
-			name .. "=" .. tostring(count)
-	end
-	table.sort(releaseSummary)
-	print(
-		"[Auto GK] movement release reasons:",
-		table.concat(releaseSummary, ", "),
-		"| last:", S.lastReleaseReason
-	)
-	if LocalPlayer.Character then
-		local character = LocalPlayer.Character
-		local root = character:FindFirstChild("HumanoidRootPart")
-		local humanoid = character:FindFirstChildOfClass("Humanoid")
-		local okSuspended, suspended = pcall(
-			M.Controllers.IsSuspended,
-			character
-		)
-		local okDive, diveActive = pcall(
-			M.Dive.IsDiveConstraintActive,
-			root
-		)
-		local okSlide, slideActive =
-			pcall(M.Slide.IsSlideTackling)
-		local okDodge, dodgeActive =
-			pcall(M.Dodge.IsDribbling)
-		print(
-			"[Auto GK] controller checks:",
-			"suspended",
-			okSuspended and tostring(suspended) or "unavailable",
-			"| dive rig",
-			okDive and tostring(diveActive) or "unavailable",
-			"| slide",
-			okSlide and tostring(slideActive) or "unavailable",
-			"| dodge",
-			okDodge and tostring(dodgeActive) or "unavailable"
-		)
-		if humanoid then
-			print(
-				"[Auto GK] humanoid:",
-				humanoid:GetState().Name,
-				"| speed", humanoid.WalkSpeed,
-				"| jump height", humanoid.JumpHeight
-			)
-		end
-		print(
-			"[Auto GK] movement blocks:",
-			table.concat(
-				M.Movement.GetZeroWalkSpeedSources(),
-				", "
-			)
-		)
-		for _, name in ipairs({
-			"GoalkeeperDive",
-			"SlideTackle",
-			"TackleKick",
-			"ItemBallControls",
-		}) do
-			local ok, value = pcall(
-				M.Locks.IsLocked,
-				LocalPlayer,
-				name
-			)
-			print(
-				"[Auto GK] game lock",
-				name,
-				ok and tostring(value) or "unavailable"
-			)
-		end
-	end
+print(
+"[Auto GK] consecutive runtime failures:", S.runtimeFailures,
+"| last runtime error:", S.runtimeError or "none"
+)
+print("[Auto GK] cleanup:", S.cleanupComplete == true,
+"| last cleanup error:", S.cleanupError or "none")
+print(
+"[Auto GK] name:", BUILD,
+"| alive:", S.alive,
+"| effective enabled:",
+S.alive and Config.Enabled and ENV.AUTO_GK_ENABLED
+)
+print(
+"[Auto GK] focus:", S.focused,
+"| UI busy:", S.uiBusy
+)
+print(
+"[Auto GK] sender error:",
+S.transportError or "none"
+)
+print(
+"[Auto GK] raw:", S.status, S.detail,
+"| display:", S.displayName
+)
+print(
+"[Auto GK] actions:", Stats.Requests,
+"| jumps:", Stats.JumpRequests,
+"| dives:", Stats.DiveRequests,
+"| distinct flights acted on:", Stats.FlightsActedOn
+)
+print(
+"[Auto GK] pre-shot coverage:", Config.PreShotCoverage,
+"| movement writes:", S.coverageWrites
+)
+print(
+"[Auto GK] planner:", S.lastPlanReason,
+"| immediate directions:", S.immediatePlansChecked,
+"| delayed candidates:", S.delayedPlansChecked,
+"| milliseconds:", S.plannerMilliseconds
+)
+print("[Auto GK] contact timing waits:", S.keeperWaits or 0,
+"| deadline:", S.keeperWait and math.max(0, S.keeperWait.deadline - os.clock()) or 0,
+"| intervening contact:", S.keeperContact and S.keeperContact.time or "none",
+"| timing errors:", S.keeperTimingErrors or 0,
+"| last timing error:", S.keeperTimingError or "none")
+print(
+"[Auto GK] close-range rush:", Config.CloseRangeRush,
+"| requests:", Stats.RushRequests,
+"| native controller owns rush recovery"
+)
+print(
+"[Auto GK] own lock acquisitions:", S.ownLockAcquires,
+"| releases:", S.ownLockReleases,
+"| current lease:",
+S.motionLease and S.motionLease.id or "none"
+)
+print(
+"[Auto GK] ball:", S.ballPhase,
+"|", S.ballInfo,
+"| id:", S.observedBallId
+)
+print(
+"[Auto GK] position:", Config.PositionMode,
+"| allowed:", S.allowPositioning,
+"| active:", S.positionActive,
+"| movement writes:", S.positionWrites,
+"| releases:", S.releaseWrites
+)
+print(
+"[Auto GK] frame age:",
+S.lastFrame and os.clock() - S.lastFrame.readClock or "none",
+"| jump delay estimate:", S.queueEstimate
+)
+print(
+"[Auto GK] HOLD:",
+"movement stops", S.holdStops,
+"| fresh checks", S.holdRechecks,
+"| checks without contact", S.holdRecheckMisses,
+"| follow-ups blocked", S.followupBlocks
+)
+local releaseSummary = {}
+for name, count in pairs(S.releaseReasons) do
+releaseSummary[#releaseSummary + 1] =
+name .. "=" .. tostring(count)
 end
+table.sort(releaseSummary)
+print(
+"[Auto GK] movement release reasons:",
+table.concat(releaseSummary, ", "),
+"| last:", S.lastReleaseReason
+)
+if LocalPlayer.Character then
+local character = LocalPlayer.Character
+local root = character:FindFirstChild("HumanoidRootPart")
+local humanoid = character:FindFirstChildOfClass("Humanoid")
+local okSuspended, suspended = pcall(
+M.Controllers.IsSuspended,
+character
+)
+local okDive, diveActive = pcall(
+M.Dive.IsDiveConstraintActive,
+root
+)
+local okSlide, slideActive =
+pcall(M.Slide.IsSlideTackling)
+local okDodge, dodgeActive =
+pcall(M.Dodge.IsDribbling)
+print(
+"[Auto GK] controller checks:",
+"suspended",
+okSuspended and tostring(suspended) or "unavailable",
+"| dive rig",
+okDive and tostring(diveActive) or "unavailable",
+"| slide",
+okSlide and tostring(slideActive) or "unavailable",
+"| dodge",
+okDodge and tostring(dodgeActive) or "unavailable"
+)
+if humanoid then
+print(
+"[Auto GK] humanoid:",
+humanoid:GetState().Name,
+"| speed", humanoid.WalkSpeed,
+"| jump height", humanoid.JumpHeight
+)
+end
+print(
+"[Auto GK] movement blocks:",
+table.concat(
+M.Movement.GetZeroWalkSpeedSources(),
+", "
+)
+)
+for _, name in ipairs({
+"GoalkeeperDive",
+"SlideTackle",
+"TackleKick",
+"ItemBallControls",
+}) do
+local ok, value = pcall(
+M.Locks.IsLocked,
+LocalPlayer,
+name
+)
+print(
+"[Auto GK] game lock",
+name,
+ok and tostring(value) or "unavailable"
+)
+end
+end
+end
+
 SettingsStore.Acknowledge()
 print("[Dmc] Loaded | " .. RELEASE_VERSION .. " | RightShift: show / hide")
 -- DMC MAIN END
