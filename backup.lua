@@ -1,3 +1,46 @@
+-- COMPATIBILITY POLYFILLS FOR OLDER EXECUTORS --
+task = task or {}
+task.wait = task.wait or wait or function(t) local s = os.clock() while os.clock() - s < (t or 0) do end end
+task.spawn = task.spawn or spawn or coroutine.resume
+task.defer = task.defer or function(f, ...) f(...) end
+
+if not table.clear then
+    function table.clear(t)
+        for k in pairs(t) do t[k] = nil end
+    end
+end
+if not table.find then
+    function table.find(t, value)
+        for i, v in pairs(t) do
+            if v == value then return i end
+        end
+        return nil
+    end
+end
+if not table.clone then
+    function table.clone(t)
+        local new = {}
+        for k, v in pairs(t) do new[k] = v end
+        return new
+    end
+end
+if not table.pack then
+    function table.pack(...)
+        local t = {...}
+        t.n = select("#", ...)
+        return t
+    end
+end
+if not table.unpack then
+    table.unpack = unpack
+end
+if not math.clamp then
+    function math.clamp(v, min, max)
+        return v < min and min or (v > max and max or v)
+    end
+end
+-- END POLYFILLS --
+
 local function createDmcConfigStore(d)
 local A = { Accent = "DEC173", RainbowUI = false, Selected = "", Storage = "Session only", Notice = "" }
 local document = { schema = 1, profiles = {}, accent = A.Accent, rainbowUI = false, selected = "" }
@@ -515,9 +558,6 @@ ENV.AutoGKConfig = Config
 ENV.AutoGKStats = Stats
 ENV.AUTO_GK_ENABLED = true
 ENV.AutoGKBuild = BUILD
--- Forward declaration: position() consults the rush candidate before the
--- close-range section assigns its fields. Never index a nil global here.
-local Rush = {}
 --==============================================================
 -- LIFECYCLE
 --==============================================================
@@ -1846,6 +1886,47 @@ return tostring(a.name or a.kind)
 end)
 return candidates[1]
 end
+local function divePathMayReach(f, points, horizon)
+local assist = M.Assist and M.Assist.Constants
+local dive = M.Dive.Constants
+local box = M.Hitboxes.AirReceive
+local extra = assist and assist.MaximumExtraReachStuds
+local distance = dive and dive.Distance
+local padding = M.Contacts.Constants.ContactPadding or 1.25
+if not finite(extra) or extra < 0
+or not finite(distance) or distance < 0
+or not finite(padding) or padding < 0
+or not finite(f.radius) or f.radius <= 0
+or not finite(horizon) or horizon <= 0
+or not finiteVector(f.rootCF.Position)
+or not finiteVector(f.movementVelocity)
+or not box or not finiteVector(box.Size)
+or box.Size.X <= 0 or box.Size.Y <= 0 or box.Size.Z <= 0
+or typeof(box.CFrameOffset) ~= "CFrame"
+or not finiteVector(box.CFrameOffset.Position)
+or #points < 2 then
+return true
+end
+padding = math.max(1.25, padding, f.radius * 2)
+local contactSize = box.Size + Vector3.new(padding, padding, padding)
+local reach = distance + extra + contactSize.Magnitude * 0.5
++ box.CFrameOffset.Position.Magnitude + 0.05
+local start = f.rootCF.Position
+local finish = start + f.movementVelocity * horizon
+if not finite(reach) or not finiteVector(finish) then return true end
+local minX, maxX = math.huge, -math.huge
+local minZ, maxZ = math.huge, -math.huge
+for _, point in ipairs(points) do
+local p = point.p
+if not finiteVector(p) then return true end
+minX, maxX = math.min(minX, p.X), math.max(maxX, p.X)
+minZ, maxZ = math.min(minZ, p.Z), math.max(maxZ, p.Z)
+end
+return not (maxX < math.min(start.X, finish.X) - reach
+or minX > math.max(start.X, finish.X) + reach
+or maxZ < math.min(start.Z, finish.Z) - reach
+or minZ > math.max(start.Z, finish.Z) + reach)
+end
 local KeeperTiming = {
 ForecastSeconds = 0.35,
 LaunchReserveSeconds = 0.10,
@@ -2184,7 +2265,6 @@ end
 if not authorizedFrame(f) or manualJumpHeld() then
 return false
 end
--- LEGIT PREDICTION: Add human-like reaction delay if we have plenty of time
 if Config.LegitPrediction and f.eta and f.eta > 0.6 then
 S.nextActionAt = os.clock() + (math.random(100, 250) / 1000)
 end
@@ -2676,7 +2756,6 @@ end
 if S.jump and not Config.JumpThenDive then
 return false
 end
--- LEGIT PREDICTION: Add human-like reaction delay if we have plenty of time
 if Config.LegitPrediction and fresh.eta and fresh.eta > 0.6 then
 S.nextActionAt = os.clock() + (math.random(100, 250) / 1000)
 end
@@ -2843,8 +2922,8 @@ end
 --==============================================================
 -- POSITION ASSIST
 --==============================================================
+local Rush = {}
 local function position(f, dt)
--- FIX TELEPORTING: Stop Position Assist from fighting the Rush
 if Rush.candidate ~= nil then releaseMove(true); return end
 if not S.allowPositioning or not Config.PositionAssist then
 releaseMove(true)
@@ -3199,11 +3278,11 @@ Stats.RushRequests = 0
 Rush.Role = M.Role
 Rush.Actors = M.Actors
 Rush.Motion = M.Motion
-Rush.Range = 20 -- Increased range
+Rush.Range = 20
 Rush.GoalDepth = 30
 Rush.ContactHorizon = 0.40
-Rush.ScanInterval = 0.03 -- Ultra-fast scanning
-Rush.ConfirmSeconds = 0.03 -- Instant confirmation
+Rush.ScanInterval = 0.03
+Rush.ConfirmSeconds = 0.03
 Rush.nextScan = 0
 Rush.candidate = nil
 Rush.candidateSince = 0
@@ -3307,7 +3386,6 @@ end
 if velocity:Dot(context.forward) > 2 then
 return nil
 end
--- Auto Attack ignores all facing/movement checks
 if Config.AutoAttack then
 if distance > Rush.Range then return nil end
 else
@@ -3469,7 +3547,7 @@ f.cameraCF,
 unit(f.rootCF.LookVector)
 )
 if rushDirectionAllowed(direction, f.context)
-and direction:Dot(toward) > 0.30 then -- Relaxed dot product for aggressive targeting
+and direction:Dot(toward) > 0.30 then
 local plan = {
 kind = "DIVE",
 name = name,
@@ -4154,7 +4232,7 @@ local function flat(v) return Vector3.new(v.X, 0, v.Z) end
 local function thread() return coroutine.running() or mainThread end
 local function setStatus(name, detail) A.Status, A.Detail = name, detail or "" end
 local function fail(err)
-stats.errors += 1
+stats.errors = stats.errors + 1
 A.LastError = tostring(err)
 local pair = session and session.pair
 if pair and math.abs(pair.curve - pair.manualCurve) > 1e-5 and N.Client then
@@ -4418,7 +4496,7 @@ local hum = ch:FindFirstChildOfClass("Humanoid")
 local floor = d.M.Grounding.GetStandingY(hum, root)
 airborneProjection = { y = root.Position.Y, velocityY = root.AssemblyLinearVelocity.Y, floor = floor }
 local y = math.max(floor, root.Position.Y + root.AssemblyLinearVelocity.Y * lead - workspace.Gravity * lead * lead / 2)
-delta += Vector3.new(0, y - root.Position.Y, 0)
+delta = delta + Vector3.new(0, y - root.Position.Y, 0)
 end
 origin = d.M.Physics.GetContainedGroundPosition(origin + delta, d.M.Physics.BallRadius, world)
 delta = origin - nowOrigin
@@ -4457,10 +4535,10 @@ end
 local function launch(f, aim, charge)
 local kick = flat(aim.Direction)
 if kick.Magnitude < 1e-6 then return nil end
-stats.evaluations += 1
+stats.evaluations = stats.evaluations + 1
 local predictedAim = table.clone(aim)
-predictedAim.Origin += f.aimOffset or V0
-predictedAim.CameraCFrame += f.aimOffset or V0
+predictedAim.Origin = predictedAim.Origin + (f.aimOffset or V0)
+predictedAim.CameraCFrame = predictedAim.CameraCFrame + (f.aimOffset or V0)
 local velocity = N.RawLaunch(f.character, charge or f.charge,
 d.M.Actions.PassTypes.Shot, predictedAim, f.origin, f.velocity, kick.Unit, nil,
 f.boost, f.world, nil, f.curve)
@@ -4509,7 +4587,7 @@ if seed and seed.hit and (target - seed.hit).Magnitude <= 8 then
 local error2 = target - seed.hit
 local determinant = seed.dx.X * seed.dy.Y - seed.dy.X * seed.dx.Y
 if math.abs(determinant) > 1e-5 then
-yaw = seed.yaw + math.clamp((error2.X * seed.dy.Y - seed.dy.X * seed.dx.Y) / determinant, -0.6, 0.6)
+yaw = seed.yaw + math.clamp((error2.X * seed.dy.Y - seed.dy.X * error2.Y) / determinant, -0.6, 0.6)
 pitch = math.clamp(seed.pitch + math.clamp((seed.dx.X * error2.Y - error2.X * seed.dx.Y) / determinant, -0.45, 0.45), -1.25, 1.25)
 seeded = true
 end
@@ -4534,7 +4612,7 @@ if math.abs(determinant) < 1e-5 then break end
 if seed then
 seed.hit, seed.yaw, seed.pitch, seed.dx, seed.dy = hit, yaw, pitch, dx, dy
 end
-yaw += math.clamp((error2.X * dy.Y - dy.X * error2.Y) / determinant, -0.25, 0.25)
+yaw = yaw + math.clamp((error2.X * dy.Y - dy.X * error2.Y) / determinant, -0.25, 0.25)
 pitch = math.clamp(pitch + math.clamp((dx.X * error2.Y - error2.X * dx.Y) / determinant, -0.2, 0.2), -1.25, 1.25)
 end
 return bestAim
@@ -4704,7 +4782,7 @@ end
 end
 if slideReach then
 local box = defender.tackle
-slideReach += flat(box.CFrameOffset.Position).Magnitude + math.sqrt(box.Size.X ^ 2 + box.Size.Z ^ 2) / 2
+slideReach = slideReach + flat(box.CFrameOffset.Position).Magnitude + math.sqrt(box.Size.X ^ 2 + box.Size.Z ^ 2) / 2
 end
 cached = { t0 = t0, a = a, b = b, offset0 = offset0, offset1 = offset1,
 box0 = box0, box1 = box1, radius = horizontal + halfWidth, low = low, high = high,
@@ -4877,7 +4955,7 @@ local motion = vec(cursor.Velocity) and cursor.Velocity or velocity
 local inward = -motion:Dot(mouth.forward)
 if inward <= 1e-4 then return nil end
 local dt = math.min(C.Step, math.max(0.001, remaining / inward))
-passageTime += dt
+passageTime = passageTime + dt
 local passageStart = cursor.Position
 cursor = d.M.Physics.GetStateAtTime(cursor, launchAt + passageTime, f.world, {})
 if not cursor or not vec(cursor.Position) then return nil end
@@ -4907,7 +4985,7 @@ local delta = f.velocity * lead
 local air = projection.airborne
 if air then
 local y = math.max(air.floor, air.y + air.velocityY * lead - workspace.Gravity * lead * lead / 2)
-delta += Vector3.new(0, y - air.y, 0)
+delta = delta + Vector3.new(0, y - air.y, 0)
 end
 at.origin = d.M.Physics.GetContainedGroundPosition(projection.origin + delta, f.radius, f.world)
 at.aimOffset, at.lead = at.origin - projection.origin, lead
@@ -5040,7 +5118,7 @@ rating = rate(atPower, corrected, true)
 if rating then aim = corrected end
 end
 end
-stats.candidates += 1
+stats.candidates = stats.candidates + 1
 owner.candidateEvaluations = (owner.candidateEvaluations or 0) + 1
 if rating and session == owner and A.Enabled then
 local candidate = { direction = aim.Direction, frame = f, rating = rating,
@@ -5138,7 +5216,7 @@ local callLimit = C.CallsPerSlice * 6
 while owner.job and coroutine.status(owner.job) ~= "dead" and calls < callLimit do
 local ok, err = coroutine.resume(owner.job)
 if not ok then busy = false; error(err) end
-calls += 1
+calls = calls + 1
 if (os.clock() - began) * 1000 >= C.SliceMs then break end
 end
 stats.maxSliceMs = math.max(stats.maxSliceMs, (os.clock() - began) * 1000)
@@ -5247,7 +5325,7 @@ local before = table.clone(f); before.keepers = previous; before.reachProfiles =
 local _, oldDemand = reachDemand(before, rating.position, rating.position, rating.eta)
 local _, newDemand = reachDemand(f, rating.position, rating.position, rating.eta)
 local priority = table.clone(rating)
-priority.score += (newDemand - oldDemand) * d.M.Dive.Constants.Distance
+priority.score = priority.score + (newDemand - oldDemand) * d.M.Dive.Constants.Distance
 priorities[entry] = priority
 keeperMoved = true
 elseif entry.checkedStage == owner.validationStage then
@@ -5288,12 +5366,8 @@ duplicate = seen
 break
 end
 end
-if duplicate then
-entry.checkedAt = duplicate.checkedAt
-audit.duplicatesSkipped += 1
-continue
-end
-checked += 1
+if not duplicate then
+checked = checked + 1
 owner.validationSequence = (owner.validationSequence or 0) + 1
 entry.checkedAt = owner.validationSequence
 seenAims[#seenAims + 1] = { direction = aim.Direction, curve = candidateFrame.curve,
@@ -5303,7 +5377,7 @@ local correctedEdge = false
 if not rating and edgePosition and checked < 2 then
 local corrected = insetAim(candidateFrame, aim, edgePosition)
 if corrected then
-checked += 1
+checked = checked + 1
 rating = rate(candidateFrame, corrected, false)
 if rating then
 correctedEdge = true
@@ -5367,7 +5441,6 @@ or (not owner.redirected and "AIM CONFIRMED" or (best.gap >= C.ClearGapThreshold
 decisionDetail(owner))
 local scope = scopes[thread()]
 if scope then scope.applied = true end
--- RANDOMIZER LOGIC: Spin aim wildly, but save the perfect aim for release
 if A.Randomizer and chosen then
 session.lastPerfectAim = chosen.Direction
 local chaosYaw = math.rad(math.random(-180, 180))
@@ -5416,8 +5489,8 @@ if owner.locked then
 local root = d.Player.Character and d.Player.Character:FindFirstChild("HumanoidRootPart")
 if not root or not vec(owner.nativeAimRoot) then return nil end
 local delta = root.Position - owner.nativeAimRoot
-sample.Origin += delta
-sample.CameraCFrame += delta
+sample.Origin = sample.Origin + delta
+sample.CameraCFrame = sample.CameraCFrame + delta
 end
 local f = frame(sample, 0)
 if not f or #f.keepers == 0 or not compatible(owner.frame, f)
@@ -5436,11 +5509,11 @@ end
 local began = os.clock()
 local function inBudget()
 if (os.clock() - began) * 1000 <= C.ReleaseBudgetMs then return true end
-stats.releaseBudgetSkips += 1
+stats.releaseBudgetSkips = stats.releaseBudgetSkips + 1
 owner.releaseTiming = { decision = "budget" }
 return false
 end
-stats.releaseChecks += 1
+stats.releaseChecks = stats.releaseChecks + 1
 local now = evaluate(0)
 if not inBudget() or not now then return nil end
 local remaining = f.maximumCharge - f.elapsed
@@ -5477,7 +5550,7 @@ if not rating or session ~= owner or not (A.Enabled and A.SmartRelease and eligi
 or not N.Client.IsCharging() or N.Client.IsVolleyCharging() or not ownsBall() then return end
 owner.smartDispatched = true
 owner.rating = rating
-stats.releaseRequests += 1
+stats.releaseRequests = stats.releaseRequests + 1
 N.Client.HandleInputEnded(owner.input)
 end
 local function curveCommand(command)
@@ -5686,16 +5759,15 @@ hook(d.M.Protocol, "Release", function(original) return function(command)
 local source = command
 local evaluationRecord, evaluationFrame, evaluationPosition
 command = curveCommand(command)
--- RANDOMIZER LOGIC: Snap the aim to the perfect goal location right as we shoot
 if A.Randomizer and session and session.lastPerfectAim then
 command.AimDirection = session.lastPerfectAim
 end
 if alive and A.Enabled and session and command.PassType == d.M.Actions.PassTypes.Shot then
-stats.shots += 1
-if session.smartDispatched then stats.autoReleases += 1 end
-if session.applied then stats.assisted += 1 end
-if session.applied and session.redirected then stats.redirected += 1 end
-if session.applied and not session.redirected then stats.confirmed += 1 end
+stats.shots = stats.shots + 1
+if session.smartDispatched then stats.autoReleases = stats.autoReleases + 1 end
+if session.applied then stats.assisted = stats.assisted + 1 end
+if session.applied and session.redirected then stats.redirected = stats.redirected + 1 end
+if session.applied and not session.redirected then stats.confirmed = stats.confirmed + 1 end
 stats.lastCharge, stats.lastCurve = command.ChargeSeconds or 0, command.Curve or 0
 table.insert(recentShots, { charge = stats.lastCharge, curve = stats.lastCurve,
 assisted = session.applied == true, aimLocked = session.locked == true,
@@ -5747,7 +5819,7 @@ end end)
 for _, key in ipairs({ "HandleStartRejected", "HandleReleaseRejected" }) do
 if type(N.Client[key]) == "function" then
 hook(N.Client, key, function(original) return function(...)
-if alive and A.Enabled then stats.rejected += 1 end
+if alive and A.Enabled then stats.rejected = stats.rejected + 1 end
 return original(...)
 end end)
 end
@@ -5843,7 +5915,6 @@ maxAssistDistance = C.MaxAssistDistance, clearGapThreshold = C.ClearGapThreshold
 end
 return A
 end
--- Auto dribble uses the game's native input, cooldowns and stamina rules.
 local function createStrikerMisc(d)
 local A = { AutoDribble = false, DribbleStatus = "OFF" }
 local N = {}
@@ -5885,7 +5956,7 @@ return direction.Magnitude > 1e-5 and direction.Unit or nil
 end
 local function problem(err)
 A.LastError = tostring(err)
-stats.errors += 1
+stats.errors = stats.errors + 1
 warn("[Dmc Misc] " .. A.LastError)
 end
 local function stopWatch()
@@ -5915,7 +5986,7 @@ nextDiscovery = 0
 end
 local function stopDribbleWatch(err)
 A.AutoDribble = false
-generation += 1
+generation = generation + 1
 stopWatch()
 A.DribbleStatus = "ERROR"
 problem(err)
@@ -5966,7 +6037,7 @@ pickupWindow = { character = ch, ballId = nativeOwner.ballId,
 context = nativeOwner.context, expires = os.clock() + C.PickupReadySeconds }
 if not manualHadBall and manualUntil > os.clock() then
 manualUntil = 0
-stats.pickupInputResets += 1
+stats.pickupInputResets = stats.pickupInputResets + 1
 end
 nextTick, nextDiscovery, retryAt = 0, 0, 0
 requestScan()
@@ -5974,7 +6045,7 @@ elseif userId ~= d.Player.UserId then
 pickupWindow = nil
 end
 end)
-if not ok then nativeOwner = nil; stats.observerErrors += 1 end
+if not ok then nativeOwner = nil; stats.observerErrors = stats.observerErrors + 1 end
 end
 return table.unpack(result, 1, result.n)
 end
@@ -6005,13 +6076,13 @@ and (field == "Available" or field == "Cooldown")
 local strikeEnded = field == "Active" and active == false
 and (name == "Kick" or name == "Pass" or name == "Lob" or name == "RainbowFlick")
 if not (becameReady or strikeEnded) or not ownsBall(ch) or d.M.Dodge.IsDribbling() then return end
-stats.pickupReadinessWakes += 1
+stats.pickupReadinessWakes = stats.pickupReadinessWakes + 1
 nextTick = 0
 requestScan()
 end
 controlConnection = N.Controls.OnStateChanged(function(...)
 local ok = pcall(changed, ...)
-if not ok then stats.observerErrors += 1 end
+if not ok then stats.observerErrors = stats.observerErrors + 1 end
 end)
 end
 local function eligible()
@@ -6047,10 +6118,10 @@ if gate == "COOLDOWN / BLOCKED" then
 gate = N.Controls.IsOnCooldown("Dribble") and "COOLDOWN" or "NATIVE UNREADY"
 end
 if reason then
-stats.blockedTicks += 1
+stats.blockedTicks = stats.blockedTicks + 1
 blockedBy[gate] = (blockedBy[gate] or 0) + 1
 else
-stats.readyTicks += 1
+stats.readyTicks = stats.readyTicks + 1
 end
 local last = recentGates[#recentGates]
 if not last or last.reason ~= gate then
@@ -6102,6 +6173,99 @@ end
 end)
 for _, node in ipairs(workspace:GetDescendants()) do added(node) end
 characterIndexReady = true
+end
+local function observeAttack(kind, userId, ...)
+if kind ~= "TackleStarted" and kind ~= "KickChargeStarted" and kind ~= "KickChargeUpdated"
+and kind ~= "KickReleased" and kind ~= "KickChargeCanceled" then return end
+if not finite(userId) or userId == d.Player.UserId then return end
+local actor = d.M.Actors.GetByUserId(userId)
+local character = resolveCharacter(actor and actor.Character)
+if not character or not character.Parent then return end
+local now, context = workspace:GetServerTimeNow(), d.M.Motion.GetContext(character)
+local state = attacks[character]
+if not state or state.context ~= context then state = { context = context }; attacks[character] = state end
+local started = select(7, ...)
+if kind == "TackleStarted" then
+if not finite(started) then return end
+if started > now or now - started > N.Tackle.Constants.HitboxDelaySeconds + N.Tackle.Constants.HitboxSeconds then return end
+if state.slideStarted and started <= state.slideStarted then return end
+state.slideStarted = started
+state.slideDirection = attackDirection(select(2, ...))
+else
+local actionId, presentationId, sequence = select(9, ...), select(11, ...), select(13, ...)
+local previous = state.kick
+if previous then
+if finite(presentationId) and finite(previous.presentationId) then
+if presentationId < previous.presentationId then return end
+elseif actionId ~= nil and previous.actionId ~= nil and actionId ~= previous.actionId
+and kind ~= "KickChargeStarted" then return end
+end
+local same = previous and ((presentationId ~= nil and presentationId == previous.presentationId)
+or (presentationId == nil and actionId ~= nil and actionId == previous.actionId))
+local terminal = kind == "KickReleased" or kind == "KickChargeCanceled"
+if same and not terminal then
+if previous.ended then return end
+if finite(sequence) and finite(previous.sequence) and sequence <= previous.sequence then return end
+end
+if terminal then
+state.kick = { ended = true, actionId = actionId, presentationId = presentationId }
+else
+local passType, charge = select(1, ...), select(3, ...)
+if not finite(charge) or charge < 0 or not finite(started) or started > now then return end
+if previous and finite(previous.started) and started < previous.started then return end
+if passType ~= "Shot" then
+state.kick = { ended = true, actionId = actionId, presentationId = presentationId }
+return
+end
+local constants = N.Power.GetChargeConstants(actor, N.KickCore.Constants)
+if not constants or not finite(constants.MaximumChargeSeconds) then return end
+if now - started > constants.MaximumChargeSeconds + 0.25 then return end
+state.kick = { started = started, charge = charge, at = now,
+actionId = actionId, presentationId = presentationId, sequence = sequence,
+direction = attackDirection(select(4, ...)) or attackDirection(select(15, ...)),
+sawCharging = N.ChargeState.IsCharging(actor) or (same and previous.sawCharging) or false,
+expires = started + constants.MaximumChargeSeconds + 0.25 }
+end
+end
+stats.earlyAttackSamples = stats.earlyAttackSamples + 1
+nextTick, nextDiscovery = 0, 0
+requestScan()
+end
+local function watchAttacks()
+for _, remote in ipairs(d.AttackRemotes or {}) do
+attackConnections[#attackConnections + 1] = remote.OnClientEvent:Connect(function(...)
+if not (alive and A.AutoDribble and d.alive()) then return end
+local ok = pcall(observeAttack, ...)
+if not ok then stats.observerErrors = stats.observerErrors + 1 end
+end)
+end
+end
+local function discover(ch)
+local seen, list = {}, {}
+local function add(character, actor)
+character = resolveCharacter(character)
+if not character or character == ch or seen[character] then return end
+seen[character] = true
+list[#list + 1] = { character = character, actor = actorFor(character, actor) }
+end
+for _, player in ipairs(d.Players:GetPlayers()) do add(player.Character, player) end
+for character in pairs(characterIndex) do
+if character:IsDescendantOf(workspace) then add(character) end
+end
+for character in pairs(attacks) do if character.Parent then add(character) end end
+local folder = workspace:FindFirstChild("Characters")
+local function children(container)
+if not container then return end
+for _, child in ipairs(container:GetChildren()) do
+if child:IsA("Model") then add(child) end
+end
+end
+if not characterIndexReady then
+children(folder)
+children(folder and folder:FindFirstChild("NPCs"))
+end
+candidates, cachedCharacter = list, ch
+nextDiscovery = os.clock() + C.DiscoverySeconds
 end
 local function segmentBox(a, b, half)
 local low, high = 0, 1
@@ -6157,8 +6321,8 @@ local half = box.Size * 0.5 + extent
 if observedPosition then
 local delta = observedPosition - rootCF.Position
 local offset = (rootCF * box.CFrameOffset):VectorToObjectSpace(delta)
-half += Vector3.new(math.abs(offset.X), math.abs(offset.Y), math.abs(offset.Z)) * 0.5
-rootCF += delta * 0.5
+half = half + Vector3.new(math.abs(offset.X), math.abs(offset.Y), math.abs(offset.Z)) * 0.5
+rootCF = rootCF + delta * 0.5
 end
 return rootCF, half
 end
@@ -6223,7 +6387,7 @@ fill = math.clamp(math.max(now - early.started, early.charge + now - early.at) /
 compact = false
 elseif not charging then return nil end
 if not finite(fill) or fill < 0 or fill > 1 or compact ~= false then
-if fill == nil then stats.kickStateWithoutPresentation += 1 end
+if fill == nil then stats.kickStateWithoutPresentation = stats.kickStateWithoutPresentation + 1 end
 return nil
 end
 local constants = N.Power.GetChargeConstants(actor, N.KickCore.Constants)
@@ -6284,7 +6448,7 @@ local ownCF = d.M.Motion.GetCFrame(ch) or root.CFrame
 local velocity = d.M.Motion.GetVelocity(ch) or root.AssemblyLinearVelocity
 if not vector(ownCF.Position) or not vector(velocity) then return end
 if cachedCharacter ~= ch or os.clock() >= nextDiscovery then discover(ch) end
-stats.scans += 1
+stats.scans = stats.scans + 1
 A.DribbleStatus = "WATCHING"
 local lead = reactionLead()
 local tackleHorizon, kickHorizon = C.Lookahead + lead, C.KickLookahead + lead
@@ -6309,9 +6473,9 @@ local slideDirection = sliding and attack and attack.context == context and atta
 and math.abs(untilTime - (attack.slideStarted + constants.TotalMotionSeconds)) < 1e-4
 and attack.slideDirection or nil
 local kick = kickWindow(candidate, kickHorizon)
-if not sliding and not kick then continue end
-if sliding then lastScan.activeSlides += 1 end
-if kick then lastScan.activeKicks += 1 end
+if sliding or kick then
+if sliding then lastScan.activeSlides = lastScan.activeSlides + 1 end
+if kick then lastScan.activeKicks = lastScan.activeKicks + 1 end
 local hum = other:FindFirstChildOfClass("Humanoid")
 local otherRoot = other:FindFirstChild("HumanoidRootPart")
 if hum and hum.Health > 0 and otherRoot then
@@ -6322,7 +6486,7 @@ and (otherCF.Position - ownCF.Position).Magnitude <= C.Range then
 local observedPosition = otherCF.Position
 local displayLead
 otherCF, displayLead = alignDisplayedMotion(other, otherCF, otherVelocity, sliding and age or nil, slideDirection)
-if displayLead > 0 then stats.motionAligned += 1 end
+if displayLead > 0 then stats.motionAligned = stats.motionAligned + 1 end
 lastScan.maximumDisplayLead = math.max(lastScan.maximumDisplayLead, displayLead)
 local uncertainPosition = displayLead > 0 and observedPosition or nil
 local eta = sliding and contactTime(ownCF, velocity, otherCF, otherVelocity, age, slideDirection, uncertainPosition, root.Size, tackleHorizon) or nil
@@ -6348,7 +6512,7 @@ observedFacing = { otherCF.LookVector.X, otherCF.LookVector.Y, otherCF.LookVecto
 slideDirection = slideDirection and { slideDirection.X, slideDirection.Y, slideDirection.Z } or nil,
 kickDirection = kick and kick.direction and { kick.direction.X, kick.direction.Y, kick.direction.Z } or nil }
 end
-if eta then lastScan.contacts += 1 end
+if eta then lastScan.contacts = lastScan.contacts + 1 end
 if eta and (not best or eta < best.eta or eta == best.eta and (distance or math.huge) < (best.distance or math.huge)) then
 best = { character = other, eta = eta, distance = distance, reason = reason,
 tackleAge = reason == "tackle" and age or nil,
@@ -6361,11 +6525,11 @@ end
 end
 end
 if not best or not eligible() then return end
-stats.threats += 1
+stats.threats = stats.threats + 1
 local input = N.Controls.CreateInput("Dribble")
 assert(input and N.Controls.IsInput("Dribble", input), "Native dribble binding unavailable")
 retryAt = os.clock() + C.RetrySeconds
-stats.attempts += 1
+stats.attempts = stats.attempts + 1
 local attempt = { target = best.character.Name, contactSeconds = best.eta, distance = best.distance, reason = best.reason,
 tackleAgeSeconds = best.tackleAge, hitboxRemainingSeconds = best.hitboxRemaining,
 kickChargeFill = best.kickChargeFill, earliestReleaseSeconds = best.earliestRelease,
@@ -6380,10 +6544,10 @@ end
 local started = d.M.Dodge.IsDribbling() == true
 if started then
 pickupWindow = nil
-stats.started += 1
-if best.reason == "kick" then stats.kickTriggers += 1 else stats.tackleTriggers += 1 end
+stats.started = stats.started + 1
+if best.reason == "kick" then stats.kickTriggers = stats.kickTriggers + 1 else stats.tackleTriggers = stats.tackleTriggers + 1 end
 else
-stats.nativeBlocked += 1
+stats.nativeBlocked = stats.nativeBlocked + 1
 end
 A.DribbleStatus = started and "DRIBBLING" or "NATIVE BLOCKED"
 attempt.localStarted = started
@@ -6411,7 +6575,8 @@ end)
 end
 function A.ObserveDribbleGate()
 if not (alive and A.AutoDribble and d.alive()) then return nil end
-local ch, gate = eligible()
+local ch, rootOrReason = eligible()
+local gate = ch and "ready" or rootOrReason
 if not ch then
 if gate ~= "COOLDOWN / BLOCKED" and gate ~= "DRIBBLING"
 and gate ~= "LOW STAMINA" and gate ~= "RETRY WAIT" then return nil end
@@ -6426,7 +6591,7 @@ return ch, gate
 end
 function A.SetAutoDribble(value)
 value = value == true
-generation += 1
+generation = generation + 1
 local request = generation
 if not value then
 A.AutoDribble = false
@@ -6467,78 +6632,12 @@ heartbeat = d.Run.Heartbeat:Connect(function()
 local start = os.clock()
 if not (alive and A.AutoDribble and d.alive()) or start < nextTick then return end
 if nextTick == 0 then nextTick = start + C.Interval
-else nextTick += (math.floor((start - nextTick) / C.Interval) + 1) * C.Interval end
+else nextTick = nextTick + (math.floor((start - nextTick) / C.Interval) + 1) * C.Interval end
 runScan()
 end)
 end)
 if not connected then stopDribbleWatch(connectionError); return false end
 return true
-end
-local function observeAttack(kind, userId, ...)
-if kind ~= "TackleStarted" and kind ~= "KickChargeStarted" and kind ~= "KickChargeUpdated"
-and kind ~= "KickReleased" and kind ~= "KickChargeCanceled" then return end
-if not finite(userId) or userId == d.Player.UserId then return end
-local actor = d.M.Actors.GetByUserId(userId)
-local character = resolveCharacter(actor and actor.Character)
-if not character or not character.Parent then return end
-local now, context = workspace:GetServerTimeNow(), d.M.Motion.GetContext(character)
-local state = attacks[character]
-if not state or state.context ~= context then state = { context = context }; attacks[character] = state end
-local started = select(7, ...)
-if kind == "TackleStarted" then
-if not finite(started) then return end
-if started > now or now - started > N.Tackle.Constants.HitboxDelaySeconds + N.Tackle.Constants.HitboxSeconds then return end
-if state.slideStarted and started <= state.slideStarted then return end
-state.slideStarted = started
-state.slideDirection = attackDirection(select(2, ...))
-else
-local actionId, presentationId, sequence = select(9, ...), select(11, ...), select(13, ...)
-local previous = state.kick
-if previous then
-if finite(presentationId) and finite(previous.presentationId) then
-if presentationId < previous.presentationId then return end
-elseif actionId ~= nil and previous.actionId ~= nil and actionId ~= previous.actionId
-and kind ~= "KickChargeStarted" then return end
-end
-local same = previous and ((presentationId ~= nil and presentationId == previous.presentationId)
-or (presentationId == nil and actionId ~= nil and actionId == previous.actionId))
-local terminal = kind == "KickReleased" or kind == "KickChargeCanceled"
-if same and not terminal then
-if previous.ended then return end
-if finite(sequence) and finite(previous.sequence) and sequence <= previous.sequence then return end
-end
-if terminal then
-state.kick = { ended = true, actionId = actionId, presentationId = presentationId }
-else
-local passType, charge = select(1, ...), select(3, ...)
-if not finite(charge) or charge < 0 or not finite(started) or started > now then return end
-if previous and finite(previous.started) and started < previous.started then return end
-if passType ~= "Shot" then
-state.kick = { ended = true, actionId = actionId, presentationId = presentationId }
-return
-end
-local constants = N.Power.GetChargeConstants(actor, N.KickCore.Constants)
-if not constants or not finite(constants.MaximumChargeSeconds) then return end
-if now - started > constants.MaximumChargeSeconds + 0.25 then return end
-state.kick = { started = started, charge = charge, at = now,
-actionId = actionId, presentationId = presentationId, sequence = sequence,
-direction = attackDirection(select(4, ...)) or attackDirection(select(15, ...)),
-sawCharging = N.ChargeState.IsCharging(actor) or (same and previous.sawCharging) or false,
-expires = started + constants.MaximumChargeSeconds + 0.25 }
-end
-end
-stats.earlyAttackSamples += 1
-nextTick, nextDiscovery = 0, 0
-requestScan()
-end
-local function watchAttacks()
-for _, remote in ipairs(d.AttackRemotes or {}) do
-attackConnections[#attackConnections + 1] = remote.OnClientEvent:Connect(function(...)
-if not (alive and A.AutoDribble and d.alive()) then return end
-local ok = pcall(observeAttack, ...)
-if not ok then stats.observerErrors += 1 end
-end)
-end
 end
 function A.Cleanup()
 alive = false
@@ -6559,7 +6658,6 @@ stats = table.clone(stats), recent = table.clone(recent) }
 end
 return A
 end
--- Bounded, passive evidence collection. No aim, physics, stamina or action decisions.
 local function createStrikerEvaluation(d)
 local A = {}
 local alive, sequence, heartbeat = true, 0, nil
@@ -6594,7 +6692,7 @@ local began = os.clock()
 local result = table.pack(pcall(fn, ...))
 stats.maxCallbackMs = math.max(stats.maxCallbackMs, (os.clock() - began) * 1000)
 if not result[1] then
-stats.errors += 1
+stats.errors = stats.errors + 1
 lastError = tostring(result[2])
 return nil
 end
@@ -6648,7 +6746,7 @@ end)
 end
 local function newRecord(kind, detail)
 if not alive or not d.alive() then return nil end
-sequence += 1
+sequence = sequence + 1
 local r = plain(detail or {})
 r.id, r.kind, r.observedAt = sequence, kind, os.clock()
 r.build, r.trialId = d.build or "unlabelled_build", trial and trial.id or nil
@@ -6661,15 +6759,18 @@ r.ballId = d.M.Renderer.GetMatchBallId()
 r.character = d.Player.Character
 r.deadline = r.observedAt + (kind == "shot" and 8 or 1.5)
 r.serverStatus = "unconfirmed"
-if trial then trial[kind == "shot" and "shots" or "dribbles"] += 1 end
+if trial then 
+    local _k = kind == "shot" and "shots" or "dribbles"
+    trial[_k] = (trial[_k] or 0) + 1 
+end
 local list = kind == "shot" and shots or dribbles
 list[#list + 1] = r
 if #list > 40 then
 close(table.remove(list, 1), "record_limit")
 local key = kind == "shot" and "droppedShots" or "droppedDribbles"
-stats[key] += 1
+stats[key] = stats[key] + 1
 end
-if kind == "shot" then stats.shots += 1 else stats.dribbles += 1 end
+if kind == "shot" then stats.shots = stats.shots + 1 else stats.dribbles = stats.dribbles + 1 end
 watch(r)
 return r
 end
@@ -6693,7 +6794,7 @@ r.observationEnd = "separated_or_context_changed"
 activeEncounters[character], r = nil, nil
 end
 if not r then
-encounterSequence += 1
+encounterSequence = encounterSequence + 1
 r = { id = encounterSequence, build = d.build or "unlabelled_build", trialId = trial.id,
 sessionIdTag = d.sessionId,
 trialLabel = trial.label, scenario = trial.scenario, target = character.Name,
@@ -6701,11 +6802,11 @@ context = context, ballId = ball, observedAt = now, firstGate = gate,
 gates = {}, attemptIds = {} }
 activeEncounters[character] = r
 encounters[#encounters + 1] = r
-stats.encounters += 1
+stats.encounters = stats.encounters + 1
 if #encounters > 60 then
 local old = table.remove(encounters, 1)
 for key, value in pairs(activeEncounters) do if value == old then activeEncounters[key] = nil end end
-stats.droppedEncounters += 1
+stats.droppedEncounters = stats.droppedEncounters + 1
 end
 end
 r.lastObservedAt = now
@@ -6740,7 +6841,7 @@ for _, child in ipairs(container:GetChildren()) do if child:IsA("Model") then ad
 end
 nextRoster = now + 0.5
 end
-stats.proximitySamples += 1
+stats.proximitySamples = stats.proximitySamples + 1
 for _, entry in ipairs(roster) do
 local other = entry.character
 local hum = other.Parent and other:FindFirstChildOfClass("Humanoid")
@@ -6774,7 +6875,7 @@ return false, "Use a run label and scenario, each 1-64 characters"
 end
 local settings = settingsProbe and protect(settingsProbe) or nil
 if settingsProbe and type(settings) ~= "table" then return false, "Settings snapshot unavailable" end
-trialSequence += 1
+trialSequence = trialSequence + 1
 trial = { id = trialSequence, label = label, scenario = scenario, build = d.build or "unlabelled_build",
 startedAt = os.clock(), settings = plain(settings), firstAttemptId = sequence + 1, shots = 0, dribbles = 0 }
 trials[#trials + 1] = trial
@@ -6840,7 +6941,7 @@ local active = character:GetAttribute("Dribbling") == true
 if not active then seenInactive = true end
 if active and seenInactive and not r.dribblingAttributeObserved then
 r.dribblingAttributeObserved = true
-stats.attributeDribbles += 1
+stats.attributeDribbles = stats.attributeDribbles + 1
 end
 end)
 end)
@@ -6876,7 +6977,7 @@ and ((r.sessionId ~= nil and command.SessionId == r.sessionId)
 or (r.actionId ~= nil and command.ActionId == r.actionId))
 if matched and not r.rejected then
 r.rejected, r.serverStatus = true, "rejected"
-if r.kind == "shot" then stats.shotRejections += 1 else stats.dribbleRejections += 1 end
+if r.kind == "shot" then stats.shotRejections = stats.shotRejections + 1 else stats.dribbleRejections = stats.dribbleRejections + 1 end
 close(r, "server_rejected")
 end
 end
@@ -6896,7 +6997,7 @@ end
 if not relevant then return end
 local state = type(packet.State) == "table" and packet.State or packet
 if not vector(state.Position) or not finite(state.UpdatedAt or state.StartedAt) then
-stats.unreadableMovements += 1
+stats.unreadableMovements = stats.unreadableMovements + 1
 if not movementFields then
 local fields = {}
 for key in pairs(packet) do fields[#fields + 1] = tostring(key) end
@@ -6911,7 +7012,7 @@ if matchesFlight(r, state) then
 matched = true
 if not r.flightMatched then
 r.flightMatched, r.serverStatus = true, "flight_observed"
-stats.exactFlightMatches += 1
+stats.exactFlightMatches = stats.exactFlightMatches + 1
 end
 local stamp = state.UpdatedAt or state.StartedAt
 if not r.lastStateTime or stamp > r.lastStateTime then
@@ -6935,7 +7036,7 @@ close(r, "different_flight")
 end
 end
 end
-if not matched then stats.unmatchedMovements += 1 end
+if not matched then stats.unmatchedMovements = stats.unmatchedMovements + 1 end
 elseif packet.Kind == "Owned" then
 if not finite(packet.OwnerUserId) then return end
 for r in pairs(pending) do
@@ -7018,12 +7119,12 @@ end
 local evidence = { localStarts = 0, localRetainedAtWindowEnd = 0, ownershipLossObserved = 0,
 strikeInterruptions = 0, rejected = 0, unresolved = 0 }
 for _, r in ipairs(dribbles) do
-if r.localStarted then evidence.localStarts += 1 end
-if r.rejected then evidence.rejected += 1
-elseif r.strikeIntent then evidence.strikeInterruptions += 1
-elseif r.serverPossessionLost then evidence.ownershipLossObserved += 1
-elseif r.localOwnerAtWindowEnd == true then evidence.localRetainedAtWindowEnd += 1
-else evidence.unresolved += 1 end
+if r.localStarted then evidence.localStarts = evidence.localStarts + 1 end
+if r.rejected then evidence.rejected = evidence.rejected + 1
+elseif r.strikeIntent then evidence.strikeInterruptions = evidence.strikeInterruptions + 1
+elseif r.serverPossessionLost then evidence.ownershipLossObserved = evidence.ownershipLossObserved + 1
+elseif r.localOwnerAtWindowEnd == true then evidence.localRetainedAtWindowEnd = evidence.localRetainedAtWindowEnd + 1
+else evidence.unresolved = evidence.unresolved + 1 end
 end
 return { version = "Evaluation 0.2", build = d.build or "unlabelled_build", sessionIdTag = d.sessionId,
 stats = table.clone(stats), lastError = lastError,
@@ -7147,7 +7248,8 @@ AttackRemotes = evaluationRemotes,
 })
 S.releaseMisc = MISC.Cleanup
 EVALUATION.ConfigureComparison(MISC.ObserveDribbleGate, function()
-return { bestShot = STR.Enabled, autoCurve = STR.AutoCurve, smartRelease = STR.SmartRelease, autoDribble = MISC.AutoDribble }
+return { bestShot = STR.Enabled, autoCurve = STR.AutoCurve, smartRelease = STR.SmartRelease,
+autoDribble = MISC.AutoDribble }
 end)
 ENV.DmcMisc = MISC
 ENV.DmcMiscDebug = function()
@@ -7349,6 +7451,18 @@ local settingsBusy = false
 local editingField = nil
 local colorPickerOpen = false
 local closeColorPicker = nil
+S.isUIInput = function(input)
+if not S.alive or not Gui.Parent or not Gui.Enabled or not panel.Visible then return false end
+local kind = input.UserInputType
+if kind ~= Enum.UserInputType.MouseButton1 and kind ~= Enum.UserInputType.MouseButton2
+and kind ~= Enum.UserInputType.MouseButton3 and kind ~= Enum.UserInputType.Touch then return false end
+local point, position, size = input.Position, panel.AbsolutePosition, panel.AbsoluteSize
+return point.X >= position.X and point.X < position.X + size.X
+and point.Y >= position.Y and point.Y < position.Y + size.Y
+end
+local function updateUIBusy()
+S.uiBusy = dragging or rangeInput ~= nil or expanded ~= nil or settingsBusy or editingField ~= nil or colorPickerOpen
+end
 local activeBody = nil
 local order = 0
 local function cancelAnimation(object)
@@ -7758,7 +7872,7 @@ toggle("Auto curve ball", function() return STR.AutoCurve end, STR.SetAutoCurve)
 toggle("Smart shot release", function() return STR.SmartRelease end, STR.SetSmartRelease)
 toggle("Randomizer (Flick Shot)", function() return STR.Randomizer end, function(value) STR.SetRandomizer(value) end)
 do
-order += 1
+order = order + 1
 local row = frame(activeBody, "ShotRange", 0, 0, 292, 49, C.control)
 row.Size = UDim2.new(1, 0, 0, 49)
 row.LayoutOrder = order
@@ -7905,9 +8019,9 @@ connect(RunService.Heartbeat, function(dt)
 if not S.alive or not rainbowUI or not Gui.Parent or not Gui.Enabled
 or minimized or S.focused == false or colorPickerOpen then return end
 rainbowHue = (rainbowHue + dt / 12) % 1
-rainbowElapsed += dt
+rainbowElapsed = rainbowElapsed + dt
 if rainbowElapsed < 1 / 30 then return end
-rainbowElapsed %= 1 / 30
+rainbowElapsed = rainbowElapsed % (1 / 30)
 repaintPalette(rainbowAccent(), false)
 end)
 local settingsController = createDmcSettingsController({
