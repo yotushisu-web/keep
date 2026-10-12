@@ -160,8 +160,6 @@ return persist()
 end
 return A
 end
--- Configs use the same feature setters as the controls. A refused native setter
--- rolls settings back instead of displaying a successful load.
 local function createDmcSettingsController(d)
 local A = {}
 function A.Snapshot()
@@ -250,13 +248,11 @@ gui:Destroy()
 assert(waited, err)
 return acknowledged
 end
--- Small, dependency-free startup controller. Game modules are loaded only after
--- its status panel is visible. No executor-specific GUI or identity API is needed.
 local function createDmcStartup(d)
 local B = {
 stage = "Waiting for the game", finished = false,
-cleanup = nil :: (() -> (boolean?, string?))?,
-error = nil :: string?,
+cleanup = nil,
+error = nil,
 }
 function B.Status(text)
 B.stage = text
@@ -380,7 +376,6 @@ local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local LocalPlayer = assert(Players.LocalPlayer, "Run this on the client")
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui", 10)
--- Bump the release ID for every shipped update to trigger the one-time OK prompt.
 local RELEASE_VERSION = "2026.10.02.1"
 local BUILD = "Dmc Settings 1.5.2 | GK 3.2.7 | STR 0.16.3 | Misc 0.18.0 | Evaluation 0.2"
 local ENV = _G
@@ -396,7 +391,6 @@ encode = function(value) return settingsHttp:JSONEncode(value) end,
 decode = function(value) return settingsHttp:JSONDecode(value) end,
 remember = function(value) ENV.__DMC_CONFIG_CACHE = value end,
 })
--- Keep the current instance running until all dependencies have loaded.
 --==============================================================
 -- MODULES
 --==============================================================
@@ -521,6 +515,9 @@ ENV.AutoGKConfig = Config
 ENV.AutoGKStats = Stats
 ENV.AUTO_GK_ENABLED = true
 ENV.AutoGKBuild = BUILD
+-- Forward declaration: position() consults the rush candidate before the
+-- close-range section assigns its fields. Never index a nil global here.
+local Rush = {}
 --==============================================================
 -- LIFECYCLE
 --==============================================================
@@ -610,7 +607,6 @@ displayCandidateSince = 0,
 moveLock = "AutoGK.ContactTest."
 .. tostring(math.floor(os.clock() * 1000000)),
 }
--- Installed before listeners so partial initialization has the same cleanup contract.
 local function cleanup()
 if S.cleanupComplete then return true end
 if S.cleaningUp then return false, "Cleanup is already running" end
@@ -635,7 +631,6 @@ if S.releaseEvaluation then attempt("Evaluation observers", S.releaseEvaluation)
 if S.releaseOwnedState then
 attempt("Owned state", S.releaseOwnedState, true)
 end
--- Retain failed handles so a later call can retry them.
 local remaining = {}
 for _, connection in ipairs(S.connections) do
 if not attempt("Disconnect", function() connection:Disconnect() end) then
@@ -696,7 +691,7 @@ S.displayDetail = S.detail
 S.displayCandidate = nil
 end
 end
-local function status(name: string, detail)
+local function status(name, detail)
 S.status = name
 S.detail = detail or ""
 if S.displayName == name then
@@ -856,7 +851,6 @@ end
 local current = M.Controllers.GetMoveCommand(character)
 if current.Magnitude == 0 then return released("ALREADY_ZERO") end
 if current.Unit:Dot(owned.Unit) <= 0.999 then return released("COMMAND_CHANGED") end
--- Do not discard ownership until the write succeeds.
 assert(M.Controllers.SetMoveCommand(character, Vector3.zero) ~= false,
 "Automatic movement stop was refused")
 S.releaseWrites = S.releaseWrites + 1
@@ -1039,8 +1033,6 @@ local isRagdolled
 if type(M.Ragdoll.IsLocallyRagdolled) == "function" then
 isRagdolled = M.Ragdoll.IsLocallyRagdolled(LocalPlayer)
 elseif type(M.Ragdoll.IsEnabled) == "function" then
--- CharacterControllers uses this character-based check in the supplied
--- game build. Preserve the player-based API on builds that provide it.
 isRagdolled = M.Ragdoll.IsEnabled(character)
 else
 report("RAGDOLL API", "Missing IsLocallyRagdolled / IsEnabled; automatic actions paused")
@@ -1218,9 +1210,6 @@ status(
 end
 end
 end
--- Renderer advances/rebases position, velocity and timestamps while drawing.
--- These scalar identifiers are explicitly preserved by its sampleStateAtTime.
--- Actual Movement events remain the fallback when identifiers are unavailable.
 local function trajectoryStamp(state)
 if not state or not finiteVector(state.Position) or not finiteVector(state.Velocity) then
 return nil
@@ -1258,8 +1247,6 @@ local function plannerSetting(value, fallback, low, high)
 return math.clamp(finite(value) and value or fallback, low, high)
 end
 local function plannerDeadline(frame)
--- Match the original cadence from snapshot completion. Modelled launch
--- deadlines still belong to the time at which that snapshot was read.
 local anchor = frame.plannerAnchor or frame.readClock
 local normalHz = plannerSetting(Config.PlannerHz, 12, 1, 120)
 local urgentHz = math.max(normalHz, plannerSetting(Config.CloseShotPlannerHz, 30, 1, 120))
@@ -1393,15 +1380,12 @@ return f.rootCF
 + f.movementVelocity * t
 + Vector3.new(0, dy, 0)
 end
--- Use the same ballistic/floor model as naturalRoot to end airborne receiving.
--- The actual native state is read again on every fresh snapshot.
 local function holdLandingTime(f)
 if not f.receiveAirborne then return 0 end
 local height = math.max(0, f.rootCF.Position.Y - f.floorY)
 local velocity = f.velocity.Y
 if f.gravity > 0 then
 local speed = math.sqrt(velocity * velocity + 2 * f.gravity * height)
--- Avoid subtracting nearly equal values on a fast downward approach.
 if velocity < 0 then
 return 2 * height / (speed - velocity)
 end
@@ -1487,8 +1471,6 @@ f.at + t,
 f.world,
 output
 )
--- Match native FlightSampling: only freeze positions after the
--- physics module confirms support/boundary conditions are settled.
 settled = state.Mode == "Resting"
 and type(M.Physics.IsStateSettled) == "function"
 and M.Physics.IsStateSettled(state, f.world)
@@ -1531,10 +1513,6 @@ end
 --==============================================================
 -- THREE-DIMENSIONAL CONTACT VALIDATION
 --==============================================================
--- Enclose both the ranking box and the native contact box in world axes.
--- diveRoot only translates plan.origin, so these extents stay valid throughout
--- this single inspection, including assisted yaw/travel and a tilted root.
--- This rejects impossible work only; possible contacts still use the native API.
 local function diveContactBounds(f, plan)
 local box = M.Hitboxes.AirReceive
 local padding = M.Contacts.Constants.ContactPadding or 1.25
@@ -1557,7 +1535,6 @@ if not finiteVector(right) or not finiteVector(up)
 or not finiteVector(look) or not finiteVector(offset) then
 return nil, nil
 end
--- Expand for native floating-point arithmetic, especially far from origin.
 local p = plan.origin.Position
 local margin = 0.01 + math.max(math.abs(p.X), math.abs(p.Y), math.abs(p.Z)) * 0.000001
 local extent = Vector3.new(
@@ -1600,7 +1577,6 @@ local boundOffset, boundExtent
 local contactOptions
 if isDive then
 boundOffset, boundExtent = diveContactBounds(f, plan)
--- The native checker only reads these options; reuse them within this call.
 contactOptions = { BallRadius = f.radius }
 end
 for i = 2, #points do
@@ -1612,8 +1588,6 @@ while t0 < stop do
 local airborne = airBox ~= nil and t0 < landingAt
 local t1 = airborne and math.min(stop, landingAt) or stop
 local box = airborne and airBox or groundBox
--- Split a segment at landing so the tall airborne box cannot
--- authorize a HOLD after the standing receive box takes over.
 local width = right.t - left.t
 local p0 = left.p:Lerp(
 right.p,
@@ -1629,9 +1603,6 @@ previousRoot, previousTime = r1, t1
 local relativeHeight = p1.Y - r1.Position.Y
 local relativeEnd
 local measureMiss = true
--- Distance to an enclosing box is a lower bound on miss distance.
--- Keep the exact native miss/clearance calculation whenever it
--- could improve the ranking, including every near/interior point.
 if boundExtent and boundOffset then
 relativeEnd = p1 - r1.Position - boundOffset
 local dx = math.max(math.abs(relativeEnd.X) - boundExtent.X, 0)
@@ -1667,14 +1638,10 @@ end
 end
 local alpha
 if isDive then
--- Later segments cannot improve an already earlier contact.
--- Continue measuring clearance above: it still affects ranking.
 local possible = not contact or t0 < contact
 if possible and boundExtent and boundOffset and relativeEnd then
 local a = p0 - r0.Position - boundOffset
 local b, h = relativeEnd, boundExtent
--- Test the entire swept segment, not just its endpoints
--- individually. Opposite-side endpoints can cross the box.
 possible = not (
 (a.X > h.X and b.X > h.X) or (a.X < -h.X and b.X < -h.X)
 or (a.Y > h.Y and b.Y > h.Y) or (a.Y < -h.Y and b.Y < -h.Y)
@@ -1832,8 +1799,6 @@ local base = prepared or makeDive(f, kind, delay, name)
 base.useAssist = false
 local hit
 if prepared then
--- The ranking pass already ran the identical native contact checks on
--- this unassisted plan and snapshot. Its miss-only result isn't a catch.
 hit = base.rawContact
 base.rawContact = nil
 if hit and not hit.time then hit = nil end
@@ -1881,56 +1846,6 @@ return tostring(a.name or a.kind)
 end)
 return candidates[1]
 end
--- A broad bound for every dive direction/delay in this search. It encloses
--- full assisted travel, the rotated contact box, and pre-launch locomotion.
--- The bounds include ALL sampled segments; being outside the goal area alone
--- never disables a save. Missing/invalid bounds fall back to the full search.
-local function divePathMayReach(f, points, horizon)
-local assist = M.Assist and M.Assist.Constants
-local dive = M.Dive.Constants
-local box = M.Hitboxes.AirReceive
-local extra = assist and assist.MaximumExtraReachStuds
-local distance = dive and dive.Distance
-local padding = M.Contacts.Constants.ContactPadding or 1.25
-if not finite(extra) or extra < 0
-or not finite(distance) or distance < 0
-or not finite(padding) or padding < 0
-or not finite(f.radius) or f.radius <= 0
-or not finite(horizon) or horizon <= 0
-or not finiteVector(f.rootCF.Position)
-or not finiteVector(f.movementVelocity)
-or not box or not finiteVector(box.Size)
-or box.Size.X <= 0 or box.Size.Y <= 0 or box.Size.Z <= 0
-or typeof(box.CFrameOffset) ~= "CFrame"
-or not finiteVector(box.CFrameOffset.Position)
-or #points < 2 then
-return true
-end
--- Include native contact's minimum padding as well as this build's setting.
-padding = math.max(1.25, padding, f.radius * 2)
-local contactSize = box.Size + Vector3.new(padding, padding, padding)
-local reach = distance + extra + contactSize.Magnitude * 0.5
-+ box.CFrameOffset.Position.Magnitude + 0.05
-local start = f.rootCF.Position
-local finish = start + f.movementVelocity * horizon
-if not finite(reach) or not finiteVector(finish) then return true end
-local minX, maxX = math.huge, -math.huge
-local minZ, maxZ = math.huge, -math.huge
-for _, point in ipairs(points) do
-local p = point.p
-if not finiteVector(p) then return true end
-minX, maxX = math.min(minX, p.X), math.max(maxX, p.X)
-minZ, maxZ = math.min(minZ, p.Z), math.max(maxZ, p.Z)
-end
--- Every line segment lies inside its endpoints' combined bounding box.
--- Ignore height to retain high balls, airborne saves and landing recovery.
-return not (maxX < math.min(start.X, finish.X) - reach
-or minX > math.max(start.X, finish.X) + reach
-or maxZ < math.min(start.Z, finish.Z) - reach
-or minZ > math.max(start.Z, finish.Z) + reach)
-end
--- Receiver/blocker forecasts only postpone an already verified dive. They
--- never suppress a goal-bound ball or authorize a contact on a guessed bounce.
 local KeeperTiming = {
 ForecastSeconds = 0.35,
 LaunchReserveSeconds = 0.10,
@@ -1963,15 +1878,12 @@ local body = { cf = cf, velocity = velocity, horizontal = flat(velocity),
 floor = floor, airborne = airborne, gravity = math.max(0, f.gravity) }
 local landing = airborne and holdLandingTime({ receiveAirborne = true,
 rootCF = cf, velocity = velocity, floorY = floor, gravity = body.gravity }) or 0
--- Match Receiving.GetReceiveHitbox, including the transition at landing.
--- Use its exact oval, without inflating proximity into a predicted touch.
 local groundBox = M.Hitboxes.ExtendToFeet(M.Hitboxes.Receive, humanoid, root)
 local airBox = airborne and M.Hitboxes.ExtendToFeet(M.Hitboxes.AirReceive, humanoid, root) or nil
 local initialBox = airBox or groundBox
 actor = actor or M.Actors.GetFromCharacter(character)
 local kicker = actor and finite(actor.UserId) and actor.UserId == f.lastKickerUserId
 local leavingKicker = kicker and M.Hitboxes.ContainsPoint({ CFrame = cf }, initialBox, points[1].p)
--- Reject distant bodies before running native swept-oval intersection.
 local reach = initialBox.Size.Magnitude * 0.5 + initialBox.CFrameOffset.Position.Magnitude
 local endRoot = KeeperTiming.RootAt(body, limit).Position
 local lowX, highX = math.min(cf.Position.X, endRoot.X) - reach, math.max(cf.Position.X, endRoot.X) + reach
@@ -1999,8 +1911,6 @@ local a = left.p:Lerp(right.p, (start - left.t) / width)
 local b = left.p:Lerp(right.p, (finish - left.t) / width)
 local r0, r1 = KeeperTiming.RootAt(body, start), KeeperTiming.RootAt(body, finish)
 if leavingKicker then
--- The ball leaving its shooter is not a future reception.
--- A later re-entry after it leaves the oval is still checked.
 leavingKicker = M.Hitboxes.ContainsPoint({ CFrame = r1 }, box, b)
 else
 local alpha = M.Hitboxes.GetSegmentEnterAlpha({ CFrame = r1 }, box,
@@ -2026,7 +1936,6 @@ local seen, best = {}, nil
 local function add(character, actor)
 if not character or character == f.character or seen[character] then return end
 seen[character] = true
--- A missing/incompatible opponent rig cannot disable goalkeeper saves.
 local ok, hit = pcall(KeeperTiming.PlayerContact, f, character, actor, points,
 best and math.min(limit, best.time) or limit)
 if ok and hit then best = hit
@@ -2067,8 +1976,6 @@ end
 local hit = KeeperTiming.FindContact(f, immediate, points)
 S.keeperContact = hit
 if not hit then return immediate end
--- Compare actual native contact paths. Do not infer that reachability is
--- monotonic: curves and airborne contacts can have separate valid windows.
 local latest, candidates = nil, {}
 local minimumClearance = math.min(0.12, immediate.contact.clearance)
 for _, delay in ipairs(KeeperTiming.Delays) do
@@ -2085,8 +1992,6 @@ if not latest then return immediate end
 local safeDelay = latest.delay - reserve
 if S.keeperWait then safeDelay = math.min(safeDelay, S.keeperWait.deadline - f.readClock) end
 if safeDelay <= KeeperTiming.MinimumWaitSeconds or safeDelay <= clock - f.readClock then return immediate end
--- Validate the reserved launch itself; an earlier launch is not necessarily
--- valid just because a later launch was. Fall back to another verified path.
 S.delayedPlansChecked = (S.delayedPlansChecked or 0) + 1
 local selected = evaluateDive(f, "DIVE", safeDelay, immediate.name, points)
 if not selected or selected.contact.clearance < minimumClearance then
@@ -2105,7 +2010,6 @@ flightKey = f.flightKey, world = f.world, goal = f.context.goal, team = f.contex
 trajectory = f.sourceTrajectory, deadline = deadline }
 S.keeperWaits = (S.keeperWaits or 0) + 1
 else
--- The deadline may tighten, but never slides later on repeated samples.
 S.keeperWait.deadline = math.min(S.keeperWait.deadline, deadline)
 end
 selected.waitForContact = true
@@ -2282,7 +2186,7 @@ return false
 end
 -- LEGIT PREDICTION: Add human-like reaction delay if we have plenty of time
 if Config.LegitPrediction and f.eta and f.eta > 0.6 then
-    S.nextActionAt = os.clock() + (math.random(100, 250) / 1000)
+S.nextActionAt = os.clock() + (math.random(100, 250) / 1000)
 end
 if S.ownedMove then
 releaseMove(true)
@@ -2444,8 +2348,7 @@ S.queueEstimate * 0.7
 + boundedDelay * 0.3
 releaseJumpLatch()
 log(string.format(
-"JUMP AIRBORNE | sampled delay %.3fs"
-.. " | planning estimate %.3fs",
+"JUMP AIRBORNE | sampled delay %.3fs | planning estimate %.3fs",
 observedDelay,
 S.queueEstimate
 ))
@@ -2569,9 +2472,6 @@ if S.jump and S.jump.phase == "QUEUED" then
 attempt("OWN JUMP CANCEL", function()
 local j = S.jump
 if not j or j.phase ~= "QUEUED" then return true end
--- OFF, unload and early-return paths can arrive before updateJump.
--- Observe the existing request before pulsing the queue-cancel block.
--- Reader errors stay inside attempt: retain the request for retry.
 local impulse
 if j.reader then
 impulse = j.reader()
@@ -2589,7 +2489,6 @@ if S.jump ~= j then return true end
 if impulse then
 j.phase = "AIRBORNE"
 j.launched = os.clock()
--- No planning-delay update during shutdown; just release our latch.
 return true
 end
 return cancelQueuedJump()
@@ -2779,7 +2678,7 @@ return false
 end
 -- LEGIT PREDICTION: Add human-like reaction delay if we have plenty of time
 if Config.LegitPrediction and fresh.eta and fresh.eta > 0.6 then
-    S.nextActionAt = os.clock() + (math.random(100, 250) / 1000)
+S.nextActionAt = os.clock() + (math.random(100, 250) / 1000)
 end
 S.nextLeaseId = S.nextLeaseId + 1
 local lease = {
@@ -2932,8 +2831,7 @@ fresh.eta
 )
 end
 log(string.format(
-"DIVE SENT | %s | corrected contact %.3fs"
-.. " | goal %.3fs | margin %.3fs | id %.0f",
+"DIVE SENT | %s | corrected contact %.3fs | goal %.3fs | margin %.3fs | id %.0f",
 commit.name,
 hit.time,
 fresh.eta,
@@ -2947,7 +2845,7 @@ end
 --==============================================================
 local function position(f, dt)
 -- FIX TELEPORTING: Stop Position Assist from fighting the Rush
-if Rush.candidate ~= nil then releaseMove(true); return end 
+if Rush.candidate ~= nil then releaseMove(true); return end
 if not S.allowPositioning or not Config.PositionAssist then
 releaseMove(true)
 return
@@ -3073,8 +2971,6 @@ or Config.HomeStopRadius
 )
 startRadius = math.max(startRadius, stopRadius + 0.05)
 local distance = errorVector.Magnitude
--- Finish pre-shot coverage instead of chasing sub-stud error with tiny
--- walk commands. Keep the original restart radius and approach speed.
 local settleRadius = coverage
 and (stopRadius + math.min(0.15, (startRadius - stopRadius) * 0.5))
 or stopRadius
@@ -3195,8 +3091,6 @@ S.nextPlanAt = 0
 local revision = payload.Kind == "Movement" and trajectoryStamp(payload.State) or nil
 local identified = revision and (revision.movementSequence ~= nil
 or revision.actionId ~= nil or revision.flightStartedAt ~= nil)
--- A rebased copy of the same server trajectory may wake the planner,
--- but must not restart its absolute launch deadline.
 if not (identified and S.keeperWait and sameTrajectory(S.keeperWait.trajectory, revision)) then
 S.keeperWait = nil
 S.keeperContact = nil
@@ -3302,20 +3196,18 @@ end)
 --==============================================================
 Config.CloseRangeRush = true
 Stats.RushRequests = 0
-local Rush = {
-Role = M.Role,
-Actors = M.Actors,
-Motion = M.Motion,
-Range = 20, -- Increased range
-GoalDepth = 30,
-ContactHorizon = 0.40,
-ScanInterval = 0.03, -- Ultra-fast scanning
-ConfirmSeconds = 0.03, -- Instant confirmation
-nextScan = 0,
-candidate = nil,
-candidateSince = 0,
-lastSeenAt = 0,
-}
+Rush.Role = M.Role
+Rush.Actors = M.Actors
+Rush.Motion = M.Motion
+Rush.Range = 20 -- Increased range
+Rush.GoalDepth = 30
+Rush.ContactHorizon = 0.40
+Rush.ScanInterval = 0.03 -- Ultra-fast scanning
+Rush.ConfirmSeconds = 0.03 -- Instant confirmation
+Rush.nextScan = 0
+Rush.candidate = nil
+Rush.candidateSince = 0
+Rush.lastSeenAt = 0
 local function rushVector(v)
 return finiteVector(v)
 end
@@ -3415,16 +3307,11 @@ end
 if velocity:Dot(context.forward) > 2 then
 return nil
 end
-local closing = -velocity:Dot(offset.Unit)
-local goalDirection = unit(goalPosition - targetPosition)
-local facingGoal =
-unit(targetRoot.CFrame.LookVector):Dot(goalDirection)
-> 0.40
 -- Auto Attack ignores all facing/movement checks
 if Config.AutoAttack then
-    if distance > Rush.Range then return nil end
+if distance > Rush.Range then return nil end
 else
-    if distance > 15 then return nil end
+if distance > 15 then return nil end
 end
 local floorY = M.Grounding.GetStandingY(humanoid, root)
 if not finite(floorY) then return nil end
@@ -3997,7 +3884,6 @@ status("WAITING FOR GK", "Manual controls untouched")
 return
 end
 S.wasKeeper = true
--- Observe takeoff once before deciding whether this request is still queued.
 local jumpWasQueued = updateJump(character, root, humanoid)
 if queuedJumpMustCancel(nil) then
 cancelQueuedJump()
@@ -4130,8 +4016,6 @@ or S.lastFrame.root ~= root
 invalidateFrame(true)
 end
 if S.lastFrame and trajectoryChanged(S.lastFrame, ball) then
--- Cover a renderer revision applied after our Movement listener ran.
--- Ordinary local extrapolation never counts as a new server revision.
 S.nextPlanAt = 0
 end
 if os.clock() < S.nextPlanAt then
@@ -4204,8 +4088,6 @@ end
 if plan.kind == "JUMP" or plan.kind == "JUMP_DIVE" then
 requestJump(f, plan)
 elseif plan.delay > 0 then
--- Recheck by the modeled launch time, even between normal planner ticks.
--- The next update still validates fresh contact before any action.
 S.nextPlanAt = math.min(S.nextPlanAt, f.readClock + plan.delay)
 S.allowPositioning = true
 position(f, dt)
@@ -4258,8 +4140,7 @@ local stats = { shots = 0, assisted = 0, redirected = 0, confirmed = 0, rejected
 errors = 0, maxSliceMs = 0, maxAimMs = 0, lastCharge = 0, lastCurve = 0,
 releaseChecks = 0, releaseBudgetSkips = 0, releaseRequests = 0, autoReleases = 0, maxReleaseMs = 0 }
 local recentShots = {}
--- Native modules are populated by name during lazy installation.
-local N: { [string]: any } = {}
+local N = {}
 local session, hooks = nil, {}
 local ownerSnapshot = nil
 local scopes = setmetatable({}, { __mode = "k" })
@@ -4280,7 +4161,7 @@ if pair and math.abs(pair.curve - pair.manualCurve) > 1e-5 and N.Client then
 local ok, cancelError = pcall(function()
 if N.Client.IsCharging() then N.Client.CancelCharge() end
 end)
-if not ok then A.LastError ..= " | Curve charge cancellation: " .. tostring(cancelError) end
+if not ok then A.LastError = A.LastError .. " | Curve charge cancellation: " .. tostring(cancelError) end
 end
 A.Enabled = false
 session = nil
@@ -4300,7 +4181,6 @@ local previous = scopes[key]
 scopes[key] = { applied = false }
 local result = table.pack(pcall(fn, ...))
 scopes[key] = previous
--- An original game error must retain its original failure semantics.
 if not result[1] then error(result[2], 0) end
 return table.unpack(result, 2, result.n)
 end
@@ -4309,8 +4189,6 @@ return type(d.M.Renderer.GetMatchBallId) == "function" and d.M.Renderer.GetMatch
 end
 local function ownsBall()
 local ch = d.Player.Character
--- Follow the owner notifications used by native ChargedKick when available.
--- Renderer state may briefly disagree during network/prediction transitions.
 if ownerSnapshot and ownerSnapshot.character == ch and ownerSnapshot.ballId == ballId()
 and ownerSnapshot.context == d.M.Motion.GetContext(ch) then
 return ownerSnapshot.userId == d.Player.UserId
@@ -4364,7 +4242,6 @@ end
 return best, team, practiceGoals
 end
 local function mouthFor(goal, origin)
--- Use the physical goal plane, including rotated goals and goal depth.
 local cf, size = goal.CFrame, goal.Size
 local forward = size.X < size.Z and cf.RightVector or cf.LookVector
 forward = flat(forward)
@@ -4381,7 +4258,6 @@ halfWidth = (math.abs(lateral:Dot(cf.RightVector)) * size.X
 bottom = goal.Position.Y - size.Y / 2, top = goal.Position.Y + size.Y / 2 }
 end
 local function mouthDistance(mouth, origin)
--- Measure close range to the nearest point across the opening, including wide match goals.
 local offset = math.clamp((origin - mouth.plane):Dot(mouth.lateral), -mouth.halfWidth, mouth.halfWidth)
 return flat(origin - (mouth.plane + mouth.lateral * offset)).Magnitude
 end
@@ -4398,7 +4274,6 @@ local receive = N.Receiving.GetReceiveHitbox(character, false)
 local airReceive = N.Receiving.GetReceiveHitbox(character, true)
 local slide = N.Tackle.Constants
 local untilTime = N.Tackle.GetSlidingUntil(character)
--- SlidingUntil uses the workspace server clock, not the smoothed ball clock.
 local slideAge = untilTime and math.max(0, workspace:GetServerTimeNow() - (untilTime - slide.TotalMotionSeconds)) or nil
 local direction = flat(velocity)
 if direction.Magnitude <= 0.5 then direction = flat(cf.LookVector) end
@@ -4427,7 +4302,6 @@ if d.M.Motion.GetContext(character) ~= context then return end
 local keeper = d.M.Match.IsGoalkeeperCharacter(character)
 local otherTeam = d.M.Teams.GetActorTeamName(actor or character)
 if not keeper and (not opposing or otherTeam ~= opposing) then return end
--- Practice actors share a neutral Practice label. Match teams are adversarial.
 if not practiceGoals then
 if team and otherTeam == team then return end
 end
@@ -4437,9 +4311,6 @@ if not root or not hum or hum.Health <= 0 or (root.Position - goal.Position).Mag
 local cf = d.M.Motion.GetCFrame(character) or root.CFrame
 if not vec(cf.Position) then return end
 if practiceGoals then
--- Practice has several nearby goals, including two with identical names.
--- Associate by position and Instance identity, not names or shared team labels.
--- This is a nearest-goal heuristic; retain ties within one stud.
 local selectedDistance = (cf.Position - goal.Position).Magnitude
 for _, otherGoal in ipairs(practiceGoals) do
 if otherGoal ~= goal and otherGoal:IsA("BasePart")
@@ -4461,8 +4332,6 @@ jump = math.max(0, jump), character = character,
 upright = cf.UpVector.Y > 0.98 })
 end
 for _, player in ipairs(d.Players:GetPlayers()) do add(player.Character, player) end
--- The live practice bots are direct children of Characters.NPCs.
--- Enumerate only these two small containers, never all workspace descendants per aim read.
 local folder = workspace:FindFirstChild("Characters")
 local function addChildren(container)
 if not container then return end
@@ -4503,7 +4372,6 @@ local constants = session.constants or N.Power.GetChargeConstants(ch, N.Shoot.Co
 session.constants = constants
 local elapsed = math.max(0, os.clock() - session.started)
 if timing then
--- Use the native charge epoch and its clock, not the wrapper's entry time.
 if not num(session.chargeStartedAt) then return nil end
 elapsed = d.M.Clock.GetSmoothedServerTime() - session.chargeStartedAt
 if not num(elapsed) or elapsed < 0 then return nil end
@@ -4512,7 +4380,6 @@ local minimum = N.Core.GetMinimumReleaseSeconds(constants)
 local maximum = constants.MaximumChargeSeconds
 local charge = math.clamp(math.max(minimum, elapsed), minimum, maximum)
 local lockCharge = math.max(minimum, maximum - N.Core.Constants.AimLockSeconds)
--- Before the native lock, prefer an aim tested across the remaining charge range.
 local volley = not ownsBall() and N.Client.IsVolleyCharging()
 session.volley = volley
 local remaining, imminent = 0, true
@@ -4532,7 +4399,6 @@ remaining = math.max(0, remaining)
 imminent = N.Volley.IsStrikeImminent(d.Player, session.volleyArrival)
 charge = math.clamp(math.max(minimum, elapsed + remaining), minimum, maximum)
 end
--- Non-owner volleys keep updating aim while waiting; they do not use the owned-ball lock.
 local approachingLock = not timing and not volley and not session.releasing and elapsed >= lockCharge - 0.08
 local charges = approachingLock and { lockCharge, (lockCharge + maximum) / 2, maximum } or { charge }
 local velocity = flat(root.AssemblyLinearVelocity)
@@ -4554,8 +4420,6 @@ airborneProjection = { y = root.Position.Y, velocityY = root.AssemblyLinearVeloc
 local y = math.max(floor, root.Position.Y + root.AssemblyLinearVelocity.Y * lead - workspace.Gravity * lead * lead / 2)
 delta += Vector3.new(0, y - root.Position.Y, 0)
 end
--- The native release launches from Carry.GetLaunchPosition, including volleys.
--- Extrapolate that carry point for the short wait, without changing the outgoing camera metadata.
 origin = d.M.Physics.GetContainedGroundPosition(origin + delta, d.M.Physics.BallRadius, world)
 delta = origin - nowOrigin
 session.distance = math.max(session.distance, mouthDistance(mouth, origin))
@@ -4584,7 +4448,6 @@ end
 local function aimAt(f, yaw, pitch)
 local aim = table.clone(f.sample)
 aim.Direction = Vector3.new(math.sin(yaw) * math.cos(pitch), math.sin(pitch), math.cos(yaw) * math.cos(pitch))
--- Keep real camera/origin metadata; this is a camera aim, not a reported hit.
 aim.ClientHit, aim.TargetPosition = nil, nil
 return aim
 end
@@ -4642,13 +4505,11 @@ if direction.Magnitude < 1e-4 then return nil end
 local yaw, pitch = angles(direction.Unit)
 local directYaw, directPitch = yaw, pitch
 local seeded = false
--- Reuse a local aim-to-goal derivative from this job to start nearby targets.
--- This is only a starting guess; native flight and goal-entry checks still decide validity.
 if seed and seed.hit and (target - seed.hit).Magnitude <= 8 then
 local error2 = target - seed.hit
 local determinant = seed.dx.X * seed.dy.Y - seed.dy.X * seed.dx.Y
 if math.abs(determinant) > 1e-5 then
-yaw = seed.yaw + math.clamp((error2.X * seed.dy.Y - seed.dy.X * error2.Y) / determinant, -0.6, 0.6)
+yaw = seed.yaw + math.clamp((error2.X * seed.dy.Y - seed.dy.X * seed.dx.Y) / determinant, -0.6, 0.6)
 pitch = math.clamp(seed.pitch + math.clamp((seed.dx.X * error2.Y - error2.X * seed.dx.Y) / determinant, -0.45, 0.45), -1.25, 1.25)
 seeded = true
 end
@@ -4682,8 +4543,6 @@ local function horizontalReach(seconds, speed)
 local dive, assist = d.M.Dive.Constants, d.M.Assist.Constants
 local distance = dive.Distance + assist.MaximumExtraReachStuds
 local scale, duration = assist.MaximumTravelScale, dive.DurationSeconds
--- Maximize runTime * speed + cubicDive(diveTime), subject to runTime + diveTime = seconds.
--- Unlike 0.2 this never credits a full run and full dive over the same time interval.
 local peak = duration / scale * (1 - math.sqrt(speed * duration / (3 * distance * scale)))
 local diveSeconds = math.clamp(peak, 0, math.min(seconds, dive.HitboxCurveSeconds))
 return math.max(speed * seconds,
@@ -4695,13 +4554,10 @@ local dive = d.M.Dive.Constants
 local assist = d.M.Assist.Constants
 local box = d.M.Hitboxes.AirReceive
 local padding = math.max(d.M.Contacts.Constants.ContactPadding, f.radius * 2)
--- Sphere enclosing the padded box and offset, including tilted dive roots.
 local horizontalBox = (box.Size + Vector3.new(padding, padding, padding)).Magnitude / 2
 + box.CFrameOffset.Position.Magnitude
 local verticalBox = horizontalBox
 for _, keeper in ipairs(f.keepers) do
--- Expanded reachable volume: any dive direction plus locomotion, jump and latency.
--- This is a conservative estimate, not an exact future keeper action.
 local lead = t + f.lead + C.NetworkMargin
 local radius = horizontalBox + horizontalReach(lead, keeper.speed)
 local delta = flat(second - first)
@@ -4732,7 +4588,6 @@ local diveLimit = math.min(available, dive.HitboxCurveSeconds)
 local distance = dive.Distance + assist.MaximumExtraReachStuds
 local scale = assist.MaximumTravelScale
 local function jumpRise(seconds)
--- Allow an optimally delayed jump or an already rising keeper.
 local speed = math.max(keeper.jump, keeper.velocity.Y, 0)
 local elapsed = math.min(seconds, speed / gravity)
 return math.max(0, speed * elapsed - 0.5 * gravity * elapsed * elapsed)
@@ -4743,24 +4598,18 @@ local before = available - diveSeconds
 local radius = halfWidth + keeper.speed * before + d.M.Dive.GetTravel(diveSeconds * scale, distance)
 local rise = math.max(0, dive.InitialVerticalVelocity * diveSeconds
 + 0.5 * (dive.GravityStudsPerSecondSquared or -65) * diveSeconds * diveSeconds)
--- Same maximum lift/time relationship as native GetReachableContactHeight.
 local lift = assist.MaximumVerticalVelocityChange * diveSeconds
 / (1 + 0.5 * (assist.LiftGravityPerStud or 15) * diveSeconds * diveSeconds)
 profile[#profile + 1] = radius
 profile[#profile + 1] = topOffset + jumpRise(before) + rise + lift
 end
 for i = 0, 6 do add(diveLimit * i / 6) end
--- Include the exact horizontal run/dive optimum between the uniform samples.
 local peak = dive.DurationSeconds / scale
 * (1 - math.sqrt(keeper.speed * dive.DurationSeconds / (3 * distance * scale)))
 add(math.clamp(peak, 0, diveLimit))
 return profile
 end
 local function reachDemand(f, first, second, t)
--- Comparative difficulty only. The larger keeperGap envelope remains the
--- conservative reach diagnostic; this sampled model cannot certify a goal.
--- Frames contain immutable keeper snapshots. Share only movement envelopes
--- at identical times; every trajectory still receives its own collision check.
 local cache = f.reachProfiles
 if not cache then cache = {}; f.reachProfiles = cache end
 local profiles = cache[t]
@@ -4782,15 +4631,9 @@ if not profile then profile = reach_profile(f, keeper, t); profiles[keeper] = pr
 local best = math.huge
 local height = math.max(0, lowY - keeper.position.Y)
 for i = 1, #profile, 2 do
--- Fraction of horizontal/vertical reach required together. A signed
--- box penetration would saturate on low-ball height and could prefer
--- an easy central shot over a further corner.
 local horizontal = separation / math.max(profile[i], 0.01)
 local vertical = height / math.max(profile[i + 1], 0.01)
 best = math.min(best, math.max(horizontal, vertical))
--- Ranking only: simultaneous sideways and upward effort is harder than
--- either alone. Keep this separate from the conservative reach verdict.
--- The old max-only score treated height below the horizontal demand as free.
 difficulty = math.min(difficulty, math.max(horizontal, vertical)
 + 0.20 * math.min(horizontal, vertical))
 end
@@ -4842,8 +4685,6 @@ local horizontal = defender.speed * available
 local slideReach, slideWindow0, slideWindow1
 local c = defender.slideConstants
 if defender.slideAge then
--- Existing slide: use its replicated phase and bounded native travel.
--- Do not credit a second full dash in the same available interval.
 horizontal = math.max(horizontal, flat(offset1).Magnitude)
 slideWindow0 = math.max(a, c.HitboxDelaySeconds - defender.slideAge)
 slideWindow1 = math.min(b, c.HitboxDelaySeconds + c.HitboxSeconds - defender.slideAge)
@@ -4852,8 +4693,6 @@ slideReach = N.Tackle.GetMaximumTravelBetween(defender.slideAge,
 defender.slideAge + slideWindow1, c.StartupDashDistance, c.Distance)
 end
 else
--- Possible new tackle: run BEFORE starting it, then travel during its
--- actual hitbox window. Unknown future input/stamina remains an estimate.
 local maxAge = math.min(c.HitboxDelaySeconds + c.HitboxSeconds, available - defender.landAt)
 if maxAge >= c.HitboxDelaySeconds then
 for i = 0, 4 do
@@ -4896,14 +4735,10 @@ value = math.min(value, math.max(distance / math.max(p.slideReach, 0.01), vertic
 end
 minimum = math.min(minimum, value)
 if value <= 1 then risk = math.max(risk, 1) end
--- Relative swept segments catch a moving defender crossing the ball
--- between samples. Use native oval/box tests, not endpoint proximity.
 local direct = false
 if risk < 2 and (value <= 1 or defender.tilted) then
 local from, to = first - p.offset0, second - p.offset1
 if p.box1 ~= p.box0 then
--- Split at landing: the taller airborne box must not extend
--- into the grounded part of this sample interval.
 local alphaAtLanding = math.clamp((defender.landAt - p.a) / math.max(p.b - p.a, 1e-8), 0, 1)
 local landing = first:Lerp(second, alphaAtLanding) - defenderOffset(defender, defender.landAt)
 direct = d.M.Hitboxes.GetSegmentEnterAlpha(defender.root, p.box0, from, landing) ~= nil
@@ -4931,8 +4766,6 @@ return a.score > b.score
 end
 local function hasObstruction(f, hits)
 if not hits then return false end
--- Goal-volume entry can happen AFTER a post/wall rebound. Only contacts
--- on the native ground surfaces are allowed before the shot reaches goal.
 local ground = f.groundParts
 if not ground then
 ground = {}
@@ -4950,25 +4783,17 @@ end
 return false
 end
 local function cornerPreference(mouth, position)
--- Small tie preference for safe upper corners, subordinate to modeled
--- interception difficulty and the separate defender-risk ordering.
 local height = math.clamp((position.Y - mouth.bottom) / math.max(mouth.top - mouth.bottom, 0.01), 0, 1)
 local width = math.clamp(math.abs((position - mouth.center):Dot(mouth.lateral)) / math.max(mouth.halfWidth, 0.01), 0, 1)
 return 0.20 * height * width
 end
 local function crossbarMargin(f)
 if not (f.volley or f.sample.IsAirborne) then return C.EdgeMargin end
--- Airborne carry/camera samples and the actual strike can land on different
--- update ticks. Reserve one aim-update interval of vertical travel, with
--- bounded extra headroom; do not lower ordinary grounded shot targets.
 local dt = 1 / C.SampleHz
 local motion = (f.verticalSpeed or 0) * dt + workspace.Gravity * dt * dt / 2
 return C.EdgeMargin + math.clamp(C.TargetSlack + motion, C.TargetSlack, 1.5)
 end
 local function crossbarSweep(f, first, second)
--- Clip the swept segment to the frame vicinity. On approach only the
--- spherical cap overlaps the front plane: a steep descending volley can
--- strike the bar before its center reaches the otherwise-safe entry.
 local mouth, radius = f.mouth, f.radius
 local a = (first - mouth.plane):Dot(mouth.forward)
 local b = (second - mouth.plane):Dot(mouth.forward)
@@ -5016,8 +4841,6 @@ if eta <= 0 or eta > C.Horizon then return nil end
 local mouth = f.mouth
 local topLimit = mouth.top - f.radius - crossbarMargin(f)
 local edge = math.min(mouth.halfWidth - math.abs((position - mouth.center):Dot(mouth.lateral)), mouth.top - position.Y)
--- Keep the whole ball inside the opening, not just its centre. The same
--- check is used for current aim, searched candidates and smart release.
 if position.Y < mouth.bottom then return nil end
 if edge - f.radius < C.EdgeMargin then return nil, position end
 if position.Y > topLimit then return nil, position end
@@ -5026,8 +4849,6 @@ local defenderReach, defenderRisk, previousT = math.huge, 0, 0
 local cursor = state
 local count = math.ceil(eta / C.Step)
 for i = 1, count do
--- Common sample times reuse the frame's keeper envelopes across aims and
--- charges. The final sample is still the exact goal-entry time.
 local t = math.min(C.Step * i, eta)
 cursor = d.M.Physics.GetStateAtTime(cursor, launchAt + t, f.world, {})
 if not cursor or not vec(cursor.Position) then return nil end
@@ -5043,16 +4864,10 @@ previousT = t
 previous = cursor.Position
 if yielding and i % 8 == 0 then coroutine.yield() end
 end
--- The native entry observer interpolates between physics positions. Also
--- check the actual sampled position at its reported crossing time.
 edge = math.min(edge, mouth.halfWidth - math.abs((cursor.Position - mouth.center):Dot(mouth.lateral)),
 mouth.top - cursor.Position.Y)
 if edge - f.radius < C.EdgeMargin then return nil, cursor.Position end
 if cursor.Position.Y > topLimit then return nil, cursor.Position end
--- FirstBoxEntry reports the center entering the scoring volume. The ball
--- can still rise into the bar or bend into a post immediately afterward.
--- Follow it through the mouth (at most one ball diameter of goal depth)
--- until its trailing edge clears. Do not simulate on to the back net.
 local clearanceDepth = math.min(mouth.depth or 0, 2 * f.radius) + f.radius
 local passageTime = eta
 for _ = 1, 8 do
@@ -5067,13 +4882,8 @@ local passageStart = cursor.Position
 cursor = d.M.Physics.GetStateAtTime(cursor, launchAt + passageTime, f.world, {})
 if not cursor or not vec(cursor.Position) then return nil end
 if hasObstruction(f, cursor.BoundaryHits) then
--- Use the unreflected flight only as a repair hint. The repaired
--- direction must pass the complete native collision check again.
 return nil, d.M.Physics.GetAirFlight(f.origin, velocity, spin, passageTime)
 end
--- Do not depend on the preview world including the crossbar solid.
--- A rising volley must stay below it throughout the frame passage,
--- not merely at the first center-entry sample.
 local barPoint = crossbarSweep(f, passageStart, cursor.Position)
 if barPoint and barPoint.Y > topLimit then return nil, barPoint end
 end
@@ -5101,7 +4911,6 @@ delta += Vector3.new(0, y - air.y, 0)
 end
 at.origin = d.M.Physics.GetContainedGroundPosition(projection.origin + delta, f.radius, f.world)
 at.aimOffset, at.lead = at.origin - projection.origin, lead
--- Reach envelopes include waiting time; another release time needs its own cache.
 local profiles = projection.reachProfiles[lead]
 if not profiles then profiles = {}; projection.reachProfiles[lead] = profiles end
 at.reachProfiles = profiles
@@ -5110,17 +4919,12 @@ end
 local function rate(f, aim, yielding)
 local ranked, conservativeGap, clearance, defenderReach, defenderRisk
 for _, charge in ipairs(f.charges) do
--- Earlier releases move the carrier/camera less and give the keeper less
--- preparation time than the full-charge release in this same aim window.
 local result, edgePosition = validate(releaseFrame(f, charge), aim, charge, yielding)
 if not result then return nil, edgePosition end
 if result.gap ~= nil then conservativeGap = math.min(conservativeGap or math.huge, result.gap) end
 clearance = math.min(clearance or math.huge, result.edgeClearance)
 if result.defenderDemand then defenderReach = math.min(defenderReach or math.huge, result.defenderDemand) end
 defenderRisk = math.max(defenderRisk or 0, result.defenderRisk or 0)
--- Every possible locked release must still enter the goal safely.
--- Rank difficulty at the intended charge, rather than letting a slower
--- early-release forecast dominate a held, full-power shot.
 if not ranked or math.abs(charge - f.charge) < math.abs(ranked.predictionCharge - f.charge) then ranked = result end
 end
 if ranked then
@@ -5131,21 +4935,15 @@ return ranked
 end
 local function compatible(a, b)
 return a and b and a.character == b.character and a.goal == b.goal and a.goalCF == b.goalCF
--- World tables are proposal inputs, not reusable collision verdicts.
--- Every chosen direction is validated again against b.world before it is applied.
 and a.context == b.context and a.ballId == b.ballId and a.team == b.team
 and a.curve == b.curve and a.autoCurve == b.autoCurve and a.boost == b.boost and a.curvePower == b.curvePower
 and a.volley == b.volley and a.sample.IsAirborne == b.sample.IsAirborne and (a.origin - b.origin).Magnitude < 8
--- Sprint/charge slowdown changes velocity abruptly. Let proposals finish;
--- fresh validation uses b.velocity and b.world before any direction is applied.
 end
 local function candidateAim(entry, f)
 local direction = entry.direction
 local oldOrigin = entry.frame.sample.Origin + (entry.frame.aimOffset or V0)
 local origin = f.sample.Origin + (f.aimOffset or V0)
 local denominator = direction:Dot(f.mouth.forward)
--- Preserve the candidate's camera-ray point on the goal plane as the shooter moves.
--- This transports a starting direction, not a contact result: rate() must still validate it now.
 if (origin - oldOrigin).Magnitude > 1e-5 and math.abs(denominator) > 1e-5 then
 local distance = (f.mouth.plane - oldOrigin):Dot(f.mouth.forward) / denominator
 local delta = oldOrigin + direction * distance - origin
@@ -5155,9 +4953,6 @@ local yaw, pitch = angles(direction)
 return aimAt(f, yaw, pitch)
 end
 local function insetAim(f, aim, position)
--- A transported corner proposal can drift towards a post. Use its fresh
--- crossing as a correction hint, then validate again within the existing
--- two-proposal limit. This approximation never authorizes an aim by itself.
 local mouth = f.mouth
 local inset = f.radius + C.EdgeMargin + C.TargetSlack
 local topInset = f.radius + crossbarMargin(f) + C.TargetSlack
@@ -5184,13 +4979,11 @@ local function shotZone(mouth, point)
 local x = (point - mouth.center):Dot(mouth.lateral)
 local height = (point.Y - mouth.bottom) / math.max(mouth.top - mouth.bottom, 0.01)
 local level = height < 1 / 3 and "LOW" or (height > 2 / 3 and "HIGH" or "MID")
--- mouth.lateral points left when looking into the goal.
 local side = x > mouth.halfWidth / 3 and "LEFT" or (x < -mouth.halfWidth / 3 and "RIGHT" or "CENTER")
 return level .. " " .. side
 end
 local function searchTargets(f)
 local mouth = f.mouth
--- Leave room for the iterative solver's 0.30-stud target tolerance.
 local inset = f.radius + C.EdgeMargin + C.TargetSlack
 local half = mouth.halfWidth - inset
 local low = mouth.bottom + f.radius + 0.4
@@ -5198,8 +4991,6 @@ local high = mouth.top - f.radius - crossbarMargin(f) - C.TargetSlack
 if half <= 0 or high <= low then return {} end
 local middle = (low + high) / 2
 local targets = {}
--- Cover all nine height/side combinations, plus the lanes between center and posts.
--- Use a cheap reach estimate only to order work; it never authorizes an aim change.
 local speed = (N.Shoot.Constants.Shot and N.Shoot.Constants.Shot.MaximumSpeed) or 123
 for level, height in ipairs({ middle, high, low }) do
 for _, x in ipairs({ -half, half, 0, -half * 0.5, half * 0.5 }) do
@@ -5217,9 +5008,6 @@ if a.defenderRisk ~= b.defenderRisk then return a.defenderRisk < b.defenderRisk 
 if a.priority == b.priority then return a.order < b.order end
 return a.priority > b.priority
 end)
--- Solve both upper corners early, then cover mid/low lanes. A short charge
--- must not spend its whole search budget on bends around an easy low seed.
--- Priority affects search order only; every proposal still needs native validation.
 local ordered, seen = {}, {}
 for _, entry in ipairs(targets) do
 if entry.level == 2 and math.abs(entry.target.X) == half then
@@ -5238,8 +5026,6 @@ end
 local function startJob(f, owner)
 owner.jobFrame = f
 owner.job = coroutine.create(function()
--- Prepare an early tap option, then full-charge options before the native aim lock.
--- Every selected sample is independently revalidated at actual release powers.
 local solveFrame = table.clone(f)
 solveFrame.charge = f.maximumCharge
 solveFrame.charges = { f.maximumCharge }
@@ -5259,7 +5045,6 @@ owner.candidateEvaluations = (owner.candidateEvaluations or 0) + 1
 if rating and session == owner and A.Enabled then
 local candidate = { direction = aim.Direction, frame = f, rating = rating,
 at = os.clock(), lane = lane, power = atPower.charge, curve = atPower.curve }
--- Refresh a lane/power pair, retaining the early tap and full-power options.
 for i = #owner.candidates, 1, -1 do
 local previous = owner.candidates[i]
 if previous.lane == candidate.lane and previous.power == candidate.power
@@ -5274,9 +5059,6 @@ coroutine.yield()
 return retained
 end
 local targets = searchTargets(solveFrame)
--- Establish inexpensive left/right proposals before the iterative height solves.
--- Preserve the user's camera pitch as a seed; the native full flight still has
--- to enter the goal, and choose() checks the real charge again before using it.
 local sides = {}
 local _, pitch = angles(f.sample.Direction)
 for _, entry in ipairs(owner.rawRating and targets or {}) do
@@ -5285,7 +5067,6 @@ if side ~= 0 and (not sides[side] or math.abs(entry.target.X) > math.abs(sides[s
 sides[side] = entry
 end
 end
--- Height priority must not pull these same-pitch corner seeds inward.
 for _, side in ipairs({ -1, 1 }) do
 local entry = sides[side]
 if entry then
@@ -5307,17 +5088,12 @@ if entry.level == 3 then prepare(tapFrame, entry, {}); break end
 end
 owner.tapPrepared = true
 end
--- Compare straight and both bends at each upper corner before spending
--- time on more low variants. Each bend gets its own ballistic solve.
 local curves, seenCurves = { f.curve }, { [f.curve] = true }
 if f.autoCurve then
 for _, curve in ipairs({ -1, 1, 0 }) do
 if not seenCurves[curve] then curves[#curves + 1] = curve; seenCurves[curve] = true end
 end
 end
--- The exposed corner gets all three routes first, so a short charge
--- can compare a bend with its straight rival before solving the
--- keeper's covered corner. Target priority includes keeper reach.
 for index = 1, math.min(2, #targets) do
 for _, curve in ipairs(curves) do
 local at = table.clone(solveFrame); at.curve = curve
@@ -5325,9 +5101,6 @@ seeds[curve] = seeds[curve] or {}
 prepare(at, targets[index], seeds[curve])
 end
 end
--- A lower bend can be harder when the keeper is well off-center. Give
--- the strongest middle lane the same three-curve comparison as the
--- upper corners, rather than assigning its bend by list position.
 local middlePrepared
 if f.autoCurve then
 for _, entry in ipairs(targets) do
@@ -5347,8 +5120,6 @@ end
 end
 end
 for index, entry in ipairs(targets) do
--- Rotate curve variants through later height solves within the same
--- coroutine budget. With auto curve off, this is the original search.
 local curveVariants = f.autoCurve and { f.curve, -1, 1, 0 } or { f.curve }
 local curve = curveVariants[(index - 1) % #curveVariants + 1]
 local candidateFrame = table.clone(solveFrame); candidateFrame.curve = curve
@@ -5363,8 +5134,6 @@ busy = true
 local began, calls = os.clock(), 0
 if not owner.job or coroutine.status(owner.job) == "dead" or not compatible(owner.jobFrame, f)
 or os.clock() - owner.jobFrame.clock > C.CandidateAge then startJob(f, owner) end
--- Use otherwise idle slice capacity to cover both corners. The wall-time
--- deadline remains 2.5 ms, with no additional loop or update connection.
 local callLimit = C.CallsPerSlice * 6
 while owner.job and coroutine.status(owner.job) ~= "dead" and calls < callLimit do
 local ok, err = coroutine.resume(owner.job)
@@ -5442,10 +5211,6 @@ local choice = owner.curveChoice
 if choice and (not f.autoCurve or not compatible(choice.frame, f)) then
 owner.curveChoice, choice = nil, nil
 end
--- Keep the early preview at the player's curve while the alternatives solve.
--- Compare curves in the pre-lock window, or immediately for a release/
--- imminent volley. The native lock is the commitment boundary; a curve
--- chosen early must not exclude a stronger solution completed before it.
 local decideCurve = f.autoCurve and (#f.charges > 1 or owner.releasing or f.volley)
 local requiredCurve = choice and choice.curve
 if decideCurve then requiredCurve = nil end
@@ -5455,18 +5220,11 @@ local stage = f.volley and (f.canApply and "strike" or "prepare")
 or (#f.charges > 1 and "lock" or (owner.releasing and "release" or "early"))
 if owner.validationStage ~= stage then
 owner.validationStage = stage
--- Native curve strength changes with charge. Revisit the strongest
--- full-power proposals when entering the lock/volley window, then
--- continue the existing fair rotation with the same two-check limit.
 for _, entry in ipairs(owner.candidates) do entry.checkedAt = nil end
 end
 end
--- Recheck a completed candidate using current power, launch position and keeper state.
--- Invalid/stale work never supplies a direction to native shooting.
 local checked, seenAims = 0, {}
 local shortlist = table.clone(owner.candidates)
--- Preserve the chosen route even if the bounded search pool evicts its seed.
--- It is a proposal only: revalidate it below with current power/world/keeper data.
 local incumbent = choice and choice.candidate or owner.selectedCandidate
 if incumbent then table.insert(shortlist, 1, incumbent) end
 owner.validationPass = (owner.validationPass or 0) + 1
@@ -5485,9 +5243,6 @@ end
 end
 local rating = entry.rating
 if changed and previous and #previous > 0 and rating and rating.position and rating.eta then
--- Refresh ordering after keeper movement without rerunning every trajectory.
--- Preserve each route's flight score, adjusting its endpoint reach estimate.
--- This is only a proposal priority; the full current flight is checked below.
 local before = table.clone(f); before.keepers = previous; before.reachProfiles = nil
 local _, oldDemand = reachDemand(before, rating.position, rating.position, rating.eta)
 local _, newDemand = reachDemand(f, rating.position, rating.position, rating.eta)
@@ -5501,16 +5256,11 @@ else
 priorities[entry] = rating
 end
 end
--- Changed coverage needs a fresh rival now; stationary scenes retain fair rotation.
 local prioritizeBest = keeperMoved or owner.validationPass % 2 == 0
 table.sort(shortlist, function(a, b)
--- Revalidate the previous winner, then fairly visit alternatives. Two stale
--- top-ranked proposals must not hide every other lane until aim lock.
 local incumbent = choice and choice.candidate or owner.selectedCandidate
 if a == incumbent then return b ~= incumbent end
 if b == incumbent then return false end
--- Alternate strength and age: refresh a strong finished corner promptly,
--- while stale or invalid leaders cannot permanently hide other lanes.
 if prioritizeBest then
 local ar, br = priorities[a], priorities[b]
 if betterRating(ar, br) then return true end
@@ -5531,13 +5281,8 @@ local candidateFrame = f
 if f.autoCurve and entry.curve ~= nil then
 candidateFrame = table.clone(f); candidateFrame.curve = entry.curve
 end
--- A committed winner may also remain in the search pool. Identical
--- current rays with the same curve share a validation; keep the
--- second physics check available for a different proposal.
 local duplicate
 for _, seen in ipairs(seenAims) do
--- Rebuilding yaw/pitch can change the last float bits of the
--- same ray. Do not spend both slots checking that ray twice.
 if (seen.direction - aim.Direction).Magnitude <= 1e-6 and seen.curve == candidateFrame.curve then
 duplicate = seen
 break
@@ -5572,9 +5317,6 @@ audit.checked[#audit.checked + 1] = { valid = rating ~= nil, curve = candidateFr
 score = rating and rating.score, defenderRisk = rating and rating.defenderRisk,
 gap = rating and rating.gap, flightSeconds = rating and rating.eta,
 ageSeconds = math.max(0, os.clock() - entry.at), correctedEdge = correctedEdge }
--- A full-power search score must not keep a proposal that failed
--- the real charge window ahead of every untested alternative.
--- These values order work only; selection always uses rate() above.
 entry.checkedStage, entry.checkedRating = owner.validationStage, rating
 if betterRating(rating, best) then
 chosen, best, selectedCandidate, selectedCurve = aim, rating, entry, candidateFrame.curve
@@ -5582,14 +5324,10 @@ end
 if checked >= 2 then break end
 end
 end
--- A valid current aim is also a candidate, including while alternatives are still solving.
--- Retain it under the same scoped correction guard instead of giving it back to another aim helper.
 local confirmed = normal and (requiredCurve == nil or f.curve == requiredCurve)
 and not betterRating(best, normal)
 if confirmed then chosen, best, selectedCandidate, selectedCurve = table.clone(sample), normal, nil, f.curve end
 if choice and not chosen then
--- A commitment is not a cached collision verdict. If no checked route
--- with this curve is valid now, allow the validated ordinary fallback.
 owner.curveChoice, choice = nil, nil
 if normal then chosen, best, selectedCandidate, selectedCurve = table.clone(sample), normal, nil, f.curve end
 end
@@ -5631,13 +5369,13 @@ local scope = scopes[thread()]
 if scope then scope.applied = true end
 -- RANDOMIZER LOGIC: Spin aim wildly, but save the perfect aim for release
 if A.Randomizer and chosen then
-    session.lastPerfectAim = chosen.Direction
-    local chaosYaw = math.random(-180, 180)
-    local chaosPitch = math.random(-45, 45)
-    local randomDir = Vector3.new(math.sin(chaosYaw) * math.cos(chaosPitch), math.sin(chaosPitch), math.cos(chaosYaw) * math.cos(chaosPitch))
-    local randomAim = table.clone(chosen)
-    randomAim.Direction = randomDir
-    return randomAim
+session.lastPerfectAim = chosen.Direction
+local chaosYaw = math.rad(math.random(-180, 180))
+local chaosPitch = math.rad(math.random(-45, 45))
+local randomDir = Vector3.new(math.sin(chaosYaw) * math.cos(chaosPitch), math.sin(chaosPitch), math.cos(chaosYaw) * math.cos(chaosPitch))
+local randomAim = table.clone(chosen)
+randomAim.Direction = randomDir
+return randomAim
 end
 return chosen
 end
@@ -5662,8 +5400,6 @@ end
 local function pairedCurve(aim)
 local pair = session and session.pair
 if not (alive and A.Enabled and pair and typeof(aim) == "table") then return nil end
--- Native aim lock clones/translates the ray but preserves its direction.
--- Never attach this curve to a different aim, actor, ball or context.
 if aim.Direction ~= pair.direction or pair.character ~= d.Player.Character
 or pair.ballId ~= ballId() or pair.context ~= d.M.Motion.GetContext(pair.character)
 or not N.Curves.IsEnabled() then return nil end
@@ -5686,7 +5422,6 @@ end
 local f = frame(sample, 0)
 if not f or #f.keepers == 0 or not compatible(owner.frame, f)
 or f.elapsed < f.minimumCharge + 0.005 or f.elapsed >= f.maximumCharge - 0.015 then return nil end
--- Let auto curve make its per-shot choice before choosing its release time.
 if f.autoCurve and not owner.curveChoice then return nil end
 local curve = f.curve
 if f.autoCurve then curve = pairedCurve(sample) end
@@ -5698,9 +5433,6 @@ at = table.clone(at)
 at.curve = curve
 return rate(at, sample, false), true
 end
--- Compare the already selected trajectory now, halfway to full charge,
--- and at full charge. Forecasts include the keeper's extra waiting time.
--- This never changes a native locked direction or invents a charge value.
 local began = os.clock()
 local function inBudget()
 if (os.clock() - began) * 1000 <= C.ReleaseBudgetMs then return true end
@@ -5722,9 +5454,6 @@ for _, delay in ipairs({ remaining / 2, remaining }) do
 local later, valid = evaluate(delay)
 if not inBudget() or not valid then return nil end
 if betterRating(later, laterBest) then laterBest = later end
--- One better future option is enough to keep holding. Only an early
--- release requires all comparisons; avoid an unnecessary full-power
--- simulation when the halfway option already rules release out.
 if not worthReleasing(laterBest) then break end
 end
 local release = worthReleasing(laterBest)
@@ -5746,8 +5475,6 @@ local rating = releaseDecision(owner)
 stats.maxReleaseMs = math.max(stats.maxReleaseMs, (os.clock() - began) * 1000)
 if not rating or session ~= owner or not (A.Enabled and A.SmartRelease and eligible())
 or not N.Client.IsCharging() or N.Client.IsVolleyCharging() or not ownsBall() then return end
--- End the actual user-started press only once, after native UpdateAim has
--- stored its ray. Its own release path still enforces minimums and locks.
 owner.smartDispatched = true
 owner.rating = rating
 stats.releaseRequests += 1
@@ -5764,8 +5491,6 @@ end
 local function forwardCommand(original, source, outgoing, ...)
 if source == outgoing then return original(source, ...) end
 local result = table.pack(pcall(original, outgoing, ...))
--- Native protocol functions stamp session/sequence/lock fields on the
--- caller's table. Preserve those writes while keeping its manual curve.
 for key in pairs(source) do
 if key ~= "Curve" and outgoing[key] == nil then source[key] = nil end
 end
@@ -5886,8 +5611,6 @@ or session.releasing or session.smartDispatched then return scopeCall(original, 
 local owner = session
 local revision = owner and owner.nativeAimRevision
 local result = table.pack(scopeCall(original, ...))
--- Native aim updates are throttled. Only consider release after this
--- call reports its current ray/curve, not a previous update's sample.
 if key == "UpdateAim" and owner and session == owner and owner.nativeAimRevision ~= revision
 and not scopes[thread()] and alive and A.Enabled and A.SmartRelease then
 guarded(smartReleaseStep)
@@ -5924,7 +5647,6 @@ if math.abs(curve - (session.curve or 0)) > 1e-5 then
 session.curve = curve
 session.job = nil
 session.pair = nil
--- A newly changed curve invalidates the earlier solve before native aim is stored.
 if scope.applied and scope.source and typeof(args[4]) == "table" then
 args[4].Direction = scope.source.Direction
 scope.applied, session.applied, session.rating = false, false, nil
@@ -5933,8 +5655,6 @@ end
 end
 return original(table.unpack(args, 1, args.n))
 end end)
--- The native helper normally smooths another aim correction after Reticle.
--- For a validated STR sample, keep that correction at identity inside this call only.
 hook(N.ShotAssist, "GetAssistedDirection", function(original) return function(...)
 local scope = scopes[thread()]
 if alive and A.Enabled and scope and scope.applied then return nil, nil end
@@ -5968,7 +5688,7 @@ local evaluationRecord, evaluationFrame, evaluationPosition
 command = curveCommand(command)
 -- RANDOMIZER LOGIC: Snap the aim to the perfect goal location right as we shoot
 if A.Randomizer and session and session.lastPerfectAim then
-    command.AimDirection = session.lastPerfectAim
+command.AimDirection = session.lastPerfectAim
 end
 if alive and A.Enabled and session and command.PassType == d.M.Actions.PassTypes.Shot then
 stats.shots += 1
@@ -6052,8 +5772,6 @@ end
 local function cancelPairedCharge()
 local pair = session and session.pair
 if pair and math.abs(pair.curve - pair.manualCurve) > 1e-5 and N.Client.IsCharging() then
--- Removing the curve hooks while this aimed charge is live would launch
--- a different trajectory. Cancel only this pending auto-curved charge.
 local ok, err = pcall(N.Client.CancelCharge)
 if not ok then A.LastError = tostring(err); return false end
 end
@@ -6092,13 +5810,12 @@ function A.SetSmartRelease(value)
 if not alive or installing then return false end
 if value and not A.Enabled and not A.SetEnabled(true) then return false end
 A.SmartRelease = value == true
--- Enabling applies to the next user press. Disabling stops an active check.
 if session and not A.SmartRelease then session.smartRelease = false end
 return true
 end
 function A.SetRandomizer(value)
-    A.Randomizer = value == true
-    return true
+A.Randomizer = value == true
+return true
 end
 function A.GetAssistRange()
 return C.MaxAssistDistance
@@ -6117,26 +5834,19 @@ setStatus("OFF", "")
 return restore()
 end
 function A.Debug()
-return { enabled = A.Enabled, autoCurve = A.AutoCurve, smartRelease = A.SmartRelease, ready = A.Ready, status = A.Status, detail = A.Detail,
+return { enabled = A.Enabled, autoCurve = A.AutoCurve, smartRelease = A.SmartRelease, randomizer = A.Randomizer, ready = A.Ready, status = A.Status, detail = A.Detail,
 lastError = A.LastError, stats = table.clone(stats), active = session ~= nil,
 locked = session and session.locked or false, recentShots = table.clone(recentShots), prototype = "STR 0.16.3",
 defenderAwareness = true,
 releaseTiming = session and session.releaseTiming or nil,
 maxAssistDistance = C.MaxAssistDistance, clearGapThreshold = C.ClearGapThreshold }
 end
-if d.test then A.Test = { mouthFor = mouthFor, mouthDistance = mouthDistance, keeperGap = keeperGap,
-reachDemand = reachDemand, validate = validate, defenderDemand = defenderDemand, defenderProfile = defenderProfile,
-betterRating = betterRating,
-solve = solve, frame = frame, scopeCall = scopeCall, choose = choose, native = N,
-compatible = compatible, launch = launch, rate = rate, stats = stats, keepersFor = keepersFor, candidateAim = candidateAim,
-horizontalReach = horizontalReach, searchTargets = searchTargets, shotZone = shotZone, insetAim = insetAim,
-setSession = function(value) session = value end, getSession = function() return session end } end
 return A
 end
 -- Auto dribble uses the game's native input, cooldowns and stamina rules.
 local function createStrikerMisc(d)
 local A = { AutoDribble = false, DribbleStatus = "OFF" }
-local N: { [string]: any } = {}
+local N = {}
 local alive, loadingDribble = true, false
 local generation = 0
 local heartbeat, inputConnection = nil, nil
@@ -6252,13 +5962,8 @@ context = d.M.Motion.GetContext(ch), userId = userId } or nil
 if nativeOwner and userId == d.Player.UserId and (not previous
 or previous.userId ~= userId or previous.character ~= ch
 or previous.ballId ~= nativeOwner.ballId or previous.context ~= nativeOwner.context) then
--- Receipt can follow a refused attempt or a roster refresh.
--- Finish the native handoff before evaluating the packet batch.
 pickupWindow = { character = ch, ballId = nativeOwner.ballId,
 context = nativeOwner.context, expires = os.clock() + C.PickupReadySeconds }
--- A press made while chasing the loose ball must not carry
--- its grace delay into the newly owned ball. Active native
--- strikes, slides and jumps still enforce their own gates.
 if not manualHadBall and manualUntil > os.clock() then
 manualUntil = 0
 stats.pickupInputResets += 1
@@ -6277,7 +5982,6 @@ ownershipHook = hook
 d.M.Dodge.SetOwnerUserId = hook.wrapper
 end
 local function ownsBall(ch)
--- Follow the same handoff as native Dodge; the renderer may lag on receipt.
 if nativeOwner and nativeOwner.character == ch and nativeOwner.ballId == currentBallId()
 and nativeOwner.context == d.M.Motion.GetContext(ch) then
 return nativeOwner.userId == d.Player.UserId
@@ -6301,9 +6005,6 @@ and (field == "Available" or field == "Cooldown")
 local strikeEnded = field == "Active" and active == false
 and (name == "Kick" or name == "Pass" or name == "Lob" or name == "RainbowFlick")
 if not (becameReady or strikeEnded) or not ownsBall(ch) or d.M.Dodge.IsDribbling() then return end
--- The ownership scan may have run before the native pickup/landing
--- handoff cleared Unready. Wake on that transition rather than wait
--- for another heartbeat; defer so the entire native callback finishes.
 stats.pickupReadinessWakes += 1
 nextTick = 0
 requestScan()
@@ -6334,8 +6035,6 @@ for _, name in ipairs({ "Kick", "Pass", "Lob", "RainbowFlick" }) do
 if N.Controls.IsActive(name) then return nil, "STRIKING" end
 end
 if d.M.Dodge.IsDribbling() then return nil, "DRIBBLING" end
--- Native availability/HandleInputBegan own the action override. A slide's
--- presentation can outlast that override after a grounded ball pickup.
 if not d.M.Controllers.IsLanded(ch, hum) then return nil, "MOVING" end
 if not N.Controls.IsAvailable("Dribble") or N.Controls.IsOnCooldown("Dribble") then return nil, "COOLDOWN / BLOCKED" end
 if not N.Sprint.CanSpendStamina(N.Dodge.Constants.StaminaCost, true) then return nil, "LOW STAMINA" end
@@ -6404,6 +6103,377 @@ end)
 for _, node in ipairs(workspace:GetDescendants()) do added(node) end
 characterIndexReady = true
 end
+local function segmentBox(a, b, half)
+local low, high = 0, 1
+for _, axis in ipairs({ "X", "Y", "Z" }) do
+local origin = a[axis]
+local delta = b[axis] - origin
+local extent = half[axis]
+if math.abs(delta) < 1e-8 then
+if math.abs(origin) > extent then return false end
+else
+local enter, leave = (-extent - origin) / delta, (extent - origin) / delta
+if enter > leave then enter, leave = leave, enter end
+low, high = math.max(low, enter), math.min(high, leave)
+if low > high then return false end
+end
+end
+return true
+end
+local function alignDisplayedMotion(character, cf, velocity, slideAge, slideDirection)
+local motion = d.M.Motion
+if type(motion.GetDisplayDelaySeconds) ~= "function"
+or type(motion.GetSimulationRoot) == "function" and motion.GetSimulationRoot(character) then return cf, 0 end
+local delay = motion.GetDisplayDelaySeconds(character)
+if not finite(delay) or delay <= 0 then return cf, 0 end
+delay = math.min(delay, C.MaximumDisplayLead)
+local displacement = velocity * delay
+if slideAge then
+local direction = slideDirection or flat(velocity)
+if not slideDirection and direction.Magnitude < 1 then direction = flat(cf.LookVector) end
+if direction.Magnitude > 1e-5 then
+local constants = N.Tackle.Constants
+local motionSeconds = math.min(delay, slideAge)
+local travel = N.Tackle.GetMaximumTravelBetween(slideAge - motionSeconds, slideAge,
+constants.StartupDashDistance, constants.Distance)
+displacement = flat(velocity) * (delay - motionSeconds) + direction.Unit * travel
++ Vector3.new(0, velocity.Y * delay, 0)
+end
+end
+return cf + displacement, delay
+end
+local function contactEnvelope(rootCF, box, observedPosition, ownCF, ownSize)
+local extent = Vector3.new(C.Padding, C.Padding, C.Padding)
+if ownCF and vector(ownSize) and ownSize.X > 0 and ownSize.Y > 0 and ownSize.Z > 0 then
+local attackCF = rootCF * box.CFrameOffset
+local right = attackCF:VectorToObjectSpace(ownCF.RightVector) * (ownSize.X * 0.5)
+local up = attackCF:VectorToObjectSpace(ownCF.UpVector) * (ownSize.Y * 0.5)
+local forward = attackCF:VectorToObjectSpace(ownCF.LookVector) * (ownSize.Z * 0.5)
+extent = Vector3.new(math.max(C.Padding, math.abs(right.X) + math.abs(up.X) + math.abs(forward.X)),
+math.max(C.Padding, math.abs(right.Y) + math.abs(up.Y) + math.abs(forward.Y)),
+math.max(C.Padding, math.abs(right.Z) + math.abs(up.Z) + math.abs(forward.Z)))
+end
+local half = box.Size * 0.5 + extent
+if observedPosition then
+local delta = observedPosition - rootCF.Position
+local offset = (rootCF * box.CFrameOffset):VectorToObjectSpace(delta)
+half += Vector3.new(math.abs(offset.X), math.abs(offset.Y), math.abs(offset.Z)) * 0.5
+rootCF += delta * 0.5
+end
+return rootCF, half
+end
+local function reactionLead()
+local clock = os.clock()
+if clock >= nextPingSample then
+nextPingSample = clock + C.PingSampleSeconds
+local ok, ping = pcall(function() return d.Player:GetNetworkPing() end)
+networkLead = ok and finite(ping) and ping >= 0 and math.min(ping * 0.5, C.MaximumNetworkLead) or 0
+end
+return networkLead
+end
+local function contactTime(ownCF, ownVelocity, otherCF, otherVelocity, age, slideDirection, observedPosition, ownSize, horizon)
+local constants = N.Tackle.Constants
+local first = math.max(0, constants.HitboxDelaySeconds - age)
+local last = math.min(horizon or C.Lookahead, constants.HitboxDelaySeconds + constants.HitboxSeconds - age)
+if last < first then return nil end
+local direction = slideDirection or flat(otherVelocity)
+if not slideDirection and direction.Magnitude < 1 then direction = flat(otherCF.LookVector) end
+if direction.Magnitude < 1e-5 then return nil end
+direction = direction.Unit
+local box = d.M.Hitboxes.SlideTackle
+local facing = CFrame.lookAt(otherCF.Position, otherCF.Position + direction)
+local half
+facing, half = contactEnvelope(facing, box, observedPosition, ownCF, ownSize)
+local function point(t)
+local travel = N.Tackle.GetMaximumTravelBetween(age, age + t,
+constants.StartupDashDistance, constants.Distance)
+local rootCF = facing + direction * travel
+return (rootCF * box.CFrameOffset):PointToObjectSpace(ownCF.Position + ownVelocity * t)
+end
+local previous = point(first)
+if segmentBox(previous, previous, half) then return first end
+local steps = math.max(1, math.ceil((last - first) / C.Step))
+for i = 1, steps do
+local t = first + (last - first) * i / steps
+local current = point(t)
+if segmentBox(previous, current, half) then return t end
+previous = current
+end
+return nil
+end
+local function kickWindow(candidate, horizon)
+local other = candidate.character
+local actor = actorFor(other, candidate.actor)
+if not actor or not finite(actor.UserId) or d.M.Match.IsGoalkeeperCharacter(other) then return nil end
+local charging = N.ChargeState.IsCharging(actor)
+local fill, compact = N.Effects.GetObservedChargeFill(actor.UserId)
+local attack = attacks[other]
+local early = attack and attack.context == d.M.Motion.GetContext(other) and attack.kick
+if early then
+local now = workspace:GetServerTimeNow()
+if early.ended or now > early.expires then return nil end
+if charging then early.sawCharging = true
+elseif early.sawCharging and now - early.at > C.ChargeStateGrace then
+return nil
+end
+local constants = N.Power.GetChargeConstants(actor, N.KickCore.Constants)
+local maximum = constants and constants.MaximumChargeSeconds
+if not finite(maximum) or maximum <= 0 then return nil end
+fill = math.clamp(math.max(now - early.started, early.charge + now - early.at) / maximum, 0, 1)
+compact = false
+elseif not charging then return nil end
+if not finite(fill) or fill < 0 or fill > 1 or compact ~= false then
+if fill == nil then stats.kickStateWithoutPresentation += 1 end
+return nil
+end
+local constants = N.Power.GetChargeConstants(actor, N.KickCore.Constants)
+local maximum = constants and constants.MaximumChargeSeconds
+if not finite(maximum) or maximum <= 0 then return nil end
+local first = N.KickCore.GetMinimumReleaseDelaySeconds(fill * maximum, constants)
+if not finite(first) or first < 0 or first > (horizon or C.KickLookahead) then return nil end
+return { first = first, fill = fill, direction = early and early.direction or nil }
+end
+local function kickContactTime(ownCF, ownVelocity, otherCF, otherVelocity, first, direction, observedPosition, ownSize, horizon)
+local box = d.M.Hitboxes.Kick
+local last = horizon or C.KickLookahead
+if last < first then return nil end
+if direction then otherCF = CFrame.lookAt(otherCF.Position, otherCF.Position + direction) end
+local half
+otherCF, half = contactEnvelope(otherCF, box, observedPosition, ownCF, ownSize)
+local function point(t)
+local rootCF = otherCF + otherVelocity * t
+return (rootCF * box.CFrameOffset):PointToObjectSpace(ownCF.Position + ownVelocity * t)
+end
+local previous = point(first)
+if segmentBox(previous, previous, half) then return first end
+local steps = math.max(1, math.ceil((last - first) / C.Step))
+for i = 1, steps do
+local t = first + (last - first) * i / steps
+local current = point(t)
+if segmentBox(previous, current, half) then return t end
+previous = current
+end
+return nil
+end
+local function tick()
+local character = d.Player.Character
+if character and character.Parent and ownsBall(character) and not d.M.Dodge.IsDribbling() then
+d.M.Dodge.UpdateControlState()
+end
+local ch, rootOrReason = eligible()
+noteGate(not ch and rootOrReason or nil)
+if not ch then
+A.DribbleStatus = rootOrReason
+if rootOrReason == "COOLDOWN / BLOCKED" then
+if N.Controls.IsOnCooldown("Dribble") then
+local remaining = type(N.Controls.GetCooldownRemaining) == "function"
+and N.Controls.GetCooldownRemaining("Dribble") or nil
+A.DribbleStatus = finite(remaining) and string.format("COOLDOWN %.1fs", math.max(0, remaining)) or "COOLDOWN"
+else
+A.DribbleStatus = "NOT READY"
+end
+end
+return
+end
+local root = rootOrReason
+local team = d.M.Teams.GetActorTeamName(d.Player)
+local opposing = d.M.Match.Constants.TeamDisplayNames[team] and d.M.Match.GetOpposingTeamName(team)
+if not opposing then A.DribbleStatus = "WAITING FOR OPPONENT"; return end
+local context = d.M.Motion.GetContext(ch)
+local ownCF = d.M.Motion.GetCFrame(ch) or root.CFrame
+local velocity = d.M.Motion.GetVelocity(ch) or root.AssemblyLinearVelocity
+if not vector(ownCF.Position) or not vector(velocity) then return end
+if cachedCharacter ~= ch or os.clock() >= nextDiscovery then discover(ch) end
+stats.scans += 1
+A.DribbleStatus = "WATCHING"
+local lead = reactionLead()
+local tackleHorizon, kickHorizon = C.Lookahead + lead, C.KickLookahead + lead
+lastScan = { clock = os.clock(), activeSlides = 0, activeKicks = 0, contacts = 0, maximumDisplayLead = 0,
+networkLeadSeconds = lead, tackleHorizonSeconds = tackleHorizon, kickHorizonSeconds = kickHorizon }
+local now, best = workspace:GetServerTimeNow(), nil
+for _, candidate in ipairs(candidates) do
+local other = candidate.character
+candidate.actor = actorFor(other, candidate.actor)
+if other.Parent and d.M.Motion.GetContext(other) == context
+and characterTeam(other, candidate.actor) == opposing then
+local untilTime = N.Tackle.GetSlidingUntil(other)
+local constants = N.Tackle.Constants
+local attack = attacks[other]
+if attack and attack.context == context and attack.slideStarted then
+untilTime = math.max(finite(untilTime) and untilTime or 0, attack.slideStarted + constants.TotalMotionSeconds)
+end
+local age = finite(untilTime) and now - (untilTime - constants.TotalMotionSeconds) or nil
+local hitboxEndsAt = constants.HitboxDelaySeconds + constants.HitboxSeconds
+local sliding = age ~= nil and age >= 0 and age <= hitboxEndsAt
+local slideDirection = sliding and attack and attack.context == context and attack.slideStarted
+and math.abs(untilTime - (attack.slideStarted + constants.TotalMotionSeconds)) < 1e-4
+and attack.slideDirection or nil
+local kick = kickWindow(candidate, kickHorizon)
+if not sliding and not kick then continue end
+if sliding then lastScan.activeSlides += 1 end
+if kick then lastScan.activeKicks += 1 end
+local hum = other:FindFirstChildOfClass("Humanoid")
+local otherRoot = other:FindFirstChild("HumanoidRootPart")
+if hum and hum.Health > 0 and otherRoot then
+local otherCF = d.M.Motion.GetCFrame(other) or otherRoot.CFrame
+local otherVelocity = d.M.Motion.GetVelocity(other) or otherRoot.AssemblyLinearVelocity
+if vector(otherCF.Position) and vector(otherVelocity)
+and (otherCF.Position - ownCF.Position).Magnitude <= C.Range then
+local observedPosition = otherCF.Position
+local displayLead
+otherCF, displayLead = alignDisplayedMotion(other, otherCF, otherVelocity, sliding and age or nil, slideDirection)
+if displayLead > 0 then stats.motionAligned += 1 end
+lastScan.maximumDisplayLead = math.max(lastScan.maximumDisplayLead, displayLead)
+local uncertainPosition = displayLead > 0 and observedPosition or nil
+local eta = sliding and contactTime(ownCF, velocity, otherCF, otherVelocity, age, slideDirection, uncertainPosition, root.Size, tackleHorizon) or nil
+local kickEta = kick and kickContactTime(ownCF, velocity, otherCF, otherVelocity, kick.first, kick.direction, uncertainPosition, root.Size, kickHorizon) or nil
+local reason = "tackle"
+if kickEta and (not eta or kickEta < eta) then eta, reason = kickEta, "kick" end
+local distance = flat(otherCF.Position - ownCF.Position).Magnitude
+local observedDistance = flat(observedPosition - ownCF.Position).Magnitude
+if not lastScan.nearestThreat or observedDistance < lastScan.nearestThreat.observedDistance then
+lastScan.nearestThreat = { target = other.Name, observedDistance = observedDistance,
+alignedDistance = distance, displayLeadSeconds = displayLead,
+poseShiftStuds = (otherCF.Position - observedPosition).Magnitude,
+slideAgeSeconds = sliding and age or nil,
+hitboxRemainingSeconds = sliding and hitboxEndsAt - age or nil,
+kickEarliestReleaseSeconds = kick and kick.first or nil,
+predictedContactSeconds = eta, contactPredicted = eta ~= nil,
+ownPosition = { ownCF.Position.X, ownCF.Position.Y, ownCF.Position.Z },
+ownVelocity = { velocity.X, velocity.Y, velocity.Z },
+observedPosition = { observedPosition.X, observedPosition.Y, observedPosition.Z },
+alignedPosition = { otherCF.Position.X, otherCF.Position.Y, otherCF.Position.Z },
+opponentVelocity = { otherVelocity.X, otherVelocity.Y, otherVelocity.Z },
+observedFacing = { otherCF.LookVector.X, otherCF.LookVector.Y, otherCF.LookVector.Z },
+slideDirection = slideDirection and { slideDirection.X, slideDirection.Y, slideDirection.Z } or nil,
+kickDirection = kick and kick.direction and { kick.direction.X, kick.direction.Y, kick.direction.Z } or nil }
+end
+if eta then lastScan.contacts += 1 end
+if eta and (not best or eta < best.eta or eta == best.eta and (distance or math.huge) < (best.distance or math.huge)) then
+best = { character = other, eta = eta, distance = distance, reason = reason,
+tackleAge = reason == "tackle" and age or nil,
+hitboxRemaining = reason == "tackle" and hitboxEndsAt - age or nil,
+kickChargeFill = reason == "kick" and kick.fill or nil,
+earliestRelease = reason == "kick" and kick.first or nil, displayLead = displayLead }
+end
+end
+end
+end
+end
+if not best or not eligible() then return end
+stats.threats += 1
+local input = N.Controls.CreateInput("Dribble")
+assert(input and N.Controls.IsInput("Dribble", input), "Native dribble binding unavailable")
+retryAt = os.clock() + C.RetrySeconds
+stats.attempts += 1
+local attempt = { target = best.character.Name, contactSeconds = best.eta, distance = best.distance, reason = best.reason,
+tackleAgeSeconds = best.tackleAge, hitboxRemainingSeconds = best.hitboxRemaining,
+kickChargeFill = best.kickChargeFill, earliestReleaseSeconds = best.earliestRelease,
+displayLeadSeconds = best.displayLead,
+networkLeadSeconds = lead,
+serverConfirmed = false }
+if d.evaluation then
+d.evaluation.Dribble(attempt, function() d.M.Dodge.HandleInputBegan(input, false) end, best.character)
+else
+d.M.Dodge.HandleInputBegan(input, false)
+end
+local started = d.M.Dodge.IsDribbling() == true
+if started then
+pickupWindow = nil
+stats.started += 1
+if best.reason == "kick" then stats.kickTriggers += 1 else stats.tackleTriggers += 1 end
+else
+stats.nativeBlocked += 1
+end
+A.DribbleStatus = started and "DRIBBLING" or "NATIVE BLOCKED"
+attempt.localStarted = started
+recent[#recent + 1] = attempt
+if #recent > 8 then table.remove(recent, 1) end
+end
+local function runScan()
+queuedScan = nil
+local start = os.clock()
+scanning = true
+local succeeded, tickError = pcall(tick)
+scanning = false
+stats.maxTickMs = math.max(stats.maxTickMs, (os.clock() - start) * 1000)
+if not succeeded then stopDribbleWatch(tickError) end
+end
+requestScan = function()
+if queuedScan or not (alive and A.AutoDribble and d.alive()) then return end
+local ticket = {}
+queuedScan = ticket
+task.defer(function()
+if queuedScan ~= ticket or not (alive and A.AutoDribble and d.alive()) then return end
+nextTick = os.clock() + C.Interval
+runScan()
+end)
+end
+function A.ObserveDribbleGate()
+if not (alive and A.AutoDribble and d.alive()) then return nil end
+local ch, gate = eligible()
+if not ch then
+if gate ~= "COOLDOWN / BLOCKED" and gate ~= "DRIBBLING"
+and gate ~= "LOW STAMINA" and gate ~= "RETRY WAIT" then return nil end
+ch = d.Player.Character
+end
+if gate == "COOLDOWN / BLOCKED" then
+gate = N.Controls.IsOnCooldown("Dribble") and "cooldown" or "native_blocked"
+elseif gate == "DRIBBLING" then gate = "active"
+elseif gate == "LOW STAMINA" then gate = "low_stamina"
+elseif gate == "RETRY WAIT" then gate = "retry_wait" end
+return ch, gate
+end
+function A.SetAutoDribble(value)
+value = value == true
+generation += 1
+local request = generation
+if not value then
+A.AutoDribble = false
+stopWatch()
+A.DribbleStatus = "OFF"
+return true
+end
+if not alive or not d.alive() or loadingDribble then return false end
+if A.AutoDribble then return true end
+loadingDribble = true
+local ok, err = pcall(loadDribble)
+loadingDribble = false
+if request ~= generation or not alive or not d.alive() then return false end
+if not ok then stopDribbleWatch(err); return false end
+A.AutoDribble, A.DribbleStatus, nextTick = true, "WATCHING", 0
+local connected, connectionError = pcall(function()
+watchNativeOwner()
+watchPickupReadiness()
+watchCharacters()
+watchAttacks()
+inputConnection = d.Input.InputBegan:Connect(function(input, processed)
+if not A.AutoDribble then return end
+local checked, inputError = pcall(function()
+if N.Input.ShouldIgnoreKeybind(processed)
+or (d.ignoreManualInput and d.ignoreManualInput(input)) then return end
+for _, name in ipairs({ "Kick", "Pass", "Lob", "RainbowFlick", "Dribble", "Tackle", "Jump" }) do
+if N.Controls.IsInput(name, input) then
+manualUntil = os.clock() + C.ManualGrace
+local ch = d.Player.Character
+manualHadBall = ch ~= nil and ownsBall(ch)
+break
+end
+end
+end)
+if not checked then stopDribbleWatch(inputError) end
+end)
+heartbeat = d.Run.Heartbeat:Connect(function()
+local start = os.clock()
+if not (alive and A.AutoDribble and d.alive()) or start < nextTick then return end
+if nextTick == 0 then nextTick = start + C.Interval
+else nextTick += (math.floor((start - nextTick) / C.Interval) + 1) * C.Interval end
+runScan()
+end)
+end)
+if not connected then stopDribbleWatch(connectionError); return false end
+return true
+end
 local function observeAttack(kind, userId, ...)
 if kind ~= "TackleStarted" and kind ~= "KickChargeStarted" and kind ~= "KickChargeUpdated"
 and kind ~= "KickReleased" and kind ~= "KickChargeCanceled" then return end
@@ -6452,8 +6522,6 @@ if not constants or not finite(constants.MaximumChargeSeconds) then return end
 if now - started > constants.MaximumChargeSeconds + 0.25 then return end
 state.kick = { started = started, charge = charge, at = now,
 actionId = actionId, presentationId = presentationId, sequence = sequence,
--- p274 is the launch aim, p285 its flat kick direction.
--- p272 is animation direction and must not substitute for aim.
 direction = attackDirection(select(4, ...)) or attackDirection(select(15, ...)),
 sawCharging = N.ChargeState.IsCharging(actor) or (same and previous.sawCharging) or false,
 expires = started + constants.MaximumChargeSeconds + 0.25 }
@@ -6464,10 +6532,6 @@ nextTick, nextDiscovery = 0, 0
 requestScan()
 end
 local function watchAttacks()
--- TackleEffects queues these same packets through ReplayEvents.PresentAt.
--- Read timing on receipt so presentation delay cannot hide the windup.
--- Ordered start/update packets supply charge evidence before attributes
--- replicate. Cancellation/end packets and predicted contact still gate it.
 for _, remote in ipairs(d.AttackRemotes or {}) do
 attackConnections[#attackConnections + 1] = remote.OnClientEvent:Connect(function(...)
 if not (alive and A.AutoDribble and d.alive()) then return end
@@ -6475,456 +6539,6 @@ local ok = pcall(observeAttack, ...)
 if not ok then stats.observerErrors += 1 end
 end)
 end
-end
-local function discover(ch)
-local seen, list = {}, {}
-local function add(character, actor)
-character = resolveCharacter(character)
-if not character or character == ch or seen[character] then return end
-seen[character] = true
-list[#list + 1] = { character = character, actor = actorFor(character, actor) }
-end
-for _, player in ipairs(d.Players:GetPlayers()) do add(player.Character, player) end
-for character in pairs(characterIndex) do
-if character:IsDescendantOf(workspace) then add(character) end
-end
--- An attack packet also identifies its actor even if its model has just
--- streamed in or has not appeared in a discovery snapshot yet.
-for character in pairs(attacks) do if character.Parent then add(character) end end
-local folder = workspace:FindFirstChild("Characters")
-local function children(container)
-if not container then return end
-for _, child in ipairs(container:GetChildren()) do
-if child:IsA("Model") then add(child) end
-end
-end
-if not characterIndexReady then
-children(folder)
-children(folder and folder:FindFirstChild("NPCs"))
-end
-candidates, cachedCharacter = list, ch
-nextDiscovery = os.clock() + C.DiscoverySeconds
-end
-local function segmentBox(a, b, half)
-local low, high = 0, 1
-for _, axis in ipairs({ "X", "Y", "Z" }) do
-local origin: number = a[axis]
-local delta: number = b[axis] - origin
-local extent: number = half[axis]
-if math.abs(delta) < 1e-8 then
-if math.abs(origin) > extent then return false end
-else
-local enter, leave = (-extent - origin) / delta, (extent - origin) / delta
-if enter > leave then enter, leave = leave, enter end
-low, high = math.max(low, enter), math.min(high, leave)
-if low > high then return false end
-end
-end
-return true
-end
-local function alignDisplayedMotion(character, cf: CFrame, velocity: Vector3, slideAge: number?, slideDirection: Vector3?): (CFrame, number)
-local motion = d.M.Motion
-if type(motion.GetDisplayDelaySeconds) ~= "function"
-or type(motion.GetSimulationRoot) == "function" and motion.GetSimulationRoot(character) then return cf, 0 end
-local delay: number = motion.GetDisplayDelaySeconds(character)
-if not finite(delay) or delay <= 0 then return cf, 0 end
-delay = math.min(delay, C.MaximumDisplayLead)
-local displacement = velocity * delay
-if slideAge then
-local direction = slideDirection or flat(velocity)
-if not slideDirection and direction.Magnitude < 1 then direction = flat(cf.LookVector) end
-if direction.Magnitude > 1e-5 then
-local constants = N.Tackle.Constants
-local motionSeconds = math.min(delay, slideAge)
-local travel = N.Tackle.GetMaximumTravelBetween(slideAge - motionSeconds, slideAge,
-constants.StartupDashDistance, constants.Distance)
-displacement = flat(velocity) * (delay - motionSeconds) + direction.Unit * travel
-+ Vector3.new(0, velocity.Y * delay, 0)
-end
-end
--- GetCFrame may be an interpolated display pose. Attack age is server time:
--- bring the pose onto that timeline before predicting future contact.
--- This is a bounded estimate, never a character movement write.
-return cf + displacement, delay
-end
-local function contactEnvelope(rootCF, box, observedPosition, ownCF, ownSize)
-local extent = Vector3.new(C.Padding, C.Padding, C.Padding)
-if ownCF and vector(ownSize) and ownSize.X > 0 and ownSize.Y > 0 and ownSize.Z > 0 then
--- Sweep the carrier's root volume, not just its center. Project its
--- oriented half-extents into the attack box's axes so rear/side grazes
--- remain visible as either character turns. This is a conservative
--- contact estimate; it never changes either character's hitbox.
-local attackCF = rootCF * box.CFrameOffset
-local right = attackCF:VectorToObjectSpace(ownCF.RightVector) * (ownSize.X * 0.5)
-local up = attackCF:VectorToObjectSpace(ownCF.UpVector) * (ownSize.Y * 0.5)
-local forward = attackCF:VectorToObjectSpace(ownCF.LookVector) * (ownSize.Z * 0.5)
--- The existing margin already covered the unrotated root. Replace it
--- only where the projected body is larger; do not stack two margins
--- and turn a nearby kick that misses into a dribble trigger.
-extent = Vector3.new(math.max(C.Padding, math.abs(right.X) + math.abs(up.X) + math.abs(forward.X)),
-math.max(C.Padding, math.abs(right.Y) + math.abs(up.Y) + math.abs(forward.Y)),
-math.max(C.Padding, math.abs(right.Z) + math.abs(up.Z) + math.abs(forward.Z)))
-end
-local half = box.Size * 0.5 + extent
-if observedPosition then
--- Extrapolation is an estimate. Cover the bounded space between the
--- displayed and estimated pose rather than throwing the display pose
--- away. Otherwise compensation can advance a close attack past us.
-local delta = observedPosition - rootCF.Position
-local offset = (rootCF * box.CFrameOffset):VectorToObjectSpace(delta)
-half += Vector3.new(math.abs(offset.X), math.abs(offset.Y), math.abs(offset.Z)) * 0.5
-rootCF += delta * 0.5
-end
-return rootCF, half
-end
-local function reactionLead()
-local clock = os.clock()
-if clock >= nextPingSample then
-nextPingSample = clock + C.PingSampleSeconds
--- GetNetworkPing reports round-trip seconds. Half is a bounded
--- estimate of the outbound dodge request's travel time. Display
--- alignment corrects the opponent pose; it does not cover this trip.
-local ok, ping = pcall(function() return d.Player:GetNetworkPing() end)
-networkLead = ok and finite(ping) and ping >= 0 and math.min(ping * 0.5, C.MaximumNetworkLead) or 0
-end
-return networkLead
-end
-local function contactTime(ownCF, ownVelocity, otherCF, otherVelocity, age, slideDirection, observedPosition, ownSize, horizon)
-local constants = N.Tackle.Constants
-local first = math.max(0, constants.HitboxDelaySeconds - age)
-local last = math.min(horizon or C.Lookahead, constants.HitboxDelaySeconds + constants.HitboxSeconds - age)
-if last < first then return nil end
--- A start packet reports the committed dash direction before motion
--- interpolation necessarily catches up with a turn into the tackle.
-local direction = slideDirection or flat(otherVelocity)
-if not slideDirection and direction.Magnitude < 1 then direction = flat(otherCF.LookVector) end
-if direction.Magnitude < 1e-5 then return nil end
-direction = direction.Unit
--- The native maximum is conservative through the startup/main-dash handoff.
--- Recompute from the observed root every scan; never integrate a stale origin.
-local box = d.M.Hitboxes.SlideTackle
-local facing = CFrame.lookAt(otherCF.Position, otherCF.Position + direction)
-local half
-facing, half = contactEnvelope(facing, box, observedPosition, ownCF, ownSize)
-local function point(t)
-local travel = N.Tackle.GetMaximumTravelBetween(age, age + t,
-constants.StartupDashDistance, constants.Distance)
-local rootCF = facing + direction * travel
-return (rootCF * box.CFrameOffset):PointToObjectSpace(ownCF.Position + ownVelocity * t)
-end
-local previous = point(first)
-if segmentBox(previous, previous, half) then return first end
-local steps = math.max(1, math.ceil((last - first) / C.Step))
-for i = 1, steps do
-local t = first + (last - first) * i / steps
-local current = point(t)
-if segmentBox(previous, current, half) then return t end
-previous = current
-end
-return nil
-end
-local function kickWindow(candidate, horizon)
-local other = candidate.character
-local actor = actorFor(other, candidate.actor)
-if not actor or not finite(actor.UserId) or d.M.Match.IsGoalkeeperCharacter(other) then return nil end
-local charging = N.ChargeState.IsCharging(actor)
--- Presentation alone can linger after cancellation. It must have native
--- charge state or a still-live, ordered server start/update packet.
--- This fill is elapsed / maximum, NOT KickCore's power alpha.
-local fill, compact = N.Effects.GetObservedChargeFill(actor.UserId)
-local attack = attacks[other]
-local early = attack and attack.context == d.M.Motion.GetContext(other) and attack.kick
-if early then
-local now = workspace:GetServerTimeNow()
-if early.ended or now > early.expires then return nil end
-if charging then early.sawCharging = true
-elseif early.sawCharging and now - early.at > C.ChargeStateGrace then
--- Attribute replication and ordered presentation packets can
--- disagree briefly. Only an explicit release/cancel is terminal.
--- A stale packet cannot keep a dropped charge live, but it must
--- not poison newer updates for the same action either.
-return nil
-end
-local constants = N.Power.GetChargeConstants(actor, N.KickCore.Constants)
-local maximum = constants and constants.MaximumChargeSeconds
-if not finite(maximum) or maximum <= 0 then return nil end
-fill = math.clamp(math.max(now - early.started, early.charge + now - early.at) / maximum, 0, 1)
-compact = false
-elseif not charging then return nil end
-if not finite(fill) or fill < 0 or fill > 1 or compact ~= false then
-if fill == nil then stats.kickStateWithoutPresentation += 1 end
-return nil
-end
-local constants = N.Power.GetChargeConstants(actor, N.KickCore.Constants)
-local maximum = constants and constants.MaximumChargeSeconds
-if not finite(maximum) or maximum <= 0 then return nil end
-local first = N.KickCore.GetMinimumReleaseDelaySeconds(fill * maximum, constants)
-if not finite(first) or first < 0 or first > (horizon or C.KickLookahead) then return nil end
-return { first = first, fill = fill, direction = early and early.direction or nil }
-end
-local function kickContactTime(ownCF, ownVelocity, otherCF, otherVelocity, first, direction, observedPosition, ownSize, horizon)
-local box = d.M.Hitboxes.Kick
-local last = horizon or C.KickLookahead
-if last < first then return nil end
--- Predict the aimed hitbox from the received launch aim. The displayed
--- torso may still face the previous direction when that packet arrives.
-if direction then otherCF = CFrame.lookAt(otherCF.Position, otherCF.Position + direction) end
-local half
-otherCF, half = contactEnvelope(otherCF, box, observedPosition, ownCF, ownSize)
--- Standing kicks retain ordinary movement, not slide travel.
--- Release can happen any time after minimum charge: this is a threat estimate.
-local function point(t)
-local rootCF = otherCF + otherVelocity * t
-return (rootCF * box.CFrameOffset):PointToObjectSpace(ownCF.Position + ownVelocity * t)
-end
-local previous = point(first)
-if segmentBox(previous, previous, half) then return first end
-local steps = math.max(1, math.ceil((last - first) / C.Step))
-for i = 1, steps do
-local t = first + (last - first) * i / steps
-local current = point(t)
-if segmentBox(previous, current, half) then return t end
-previous = current
-end
-return nil
-end
-local function tick()
-local character = d.Player.Character
-if character and character.Parent and ownsBall(character) and not d.M.Dodge.IsDribbling() then
--- SetOwnerUserId updates NotOwner, but Unready/Recovery are refreshed
--- separately. Use the native refresh before reading those flags.
-d.M.Dodge.UpdateControlState()
-end
-local ch, rootOrReason = eligible()
-noteGate(not ch and rootOrReason or nil)
-if not ch then
-A.DribbleStatus = rootOrReason
-if rootOrReason == "COOLDOWN / BLOCKED" then
-if N.Controls.IsOnCooldown("Dribble") then
-local remaining = type(N.Controls.GetCooldownRemaining) == "function"
-and N.Controls.GetCooldownRemaining("Dribble") or nil
-A.DribbleStatus = finite(remaining) and string.format("COOLDOWN %.1fs", math.max(0, remaining)) or "COOLDOWN"
-else
-A.DribbleStatus = "NOT READY"
-end
-end
-return
-end
-local root = rootOrReason
-local team = d.M.Teams.GetActorTeamName(d.Player)
--- Neutral practice actors share one team; do not guess which is hostile.
-local opposing = d.M.Match.Constants.TeamDisplayNames[team] and d.M.Match.GetOpposingTeamName(team)
-if not opposing then A.DribbleStatus = "WAITING FOR OPPONENT"; return end
-local context = d.M.Motion.GetContext(ch)
-local ownCF = d.M.Motion.GetCFrame(ch) or root.CFrame
-local velocity = d.M.Motion.GetVelocity(ch) or root.AssemblyLinearVelocity
-if not vector(ownCF.Position) or not vector(velocity) then return end
-if cachedCharacter ~= ch or os.clock() >= nextDiscovery then discover(ch) end
-stats.scans += 1
-A.DribbleStatus = "WATCHING"
-local lead = reactionLead()
-local tackleHorizon, kickHorizon = C.Lookahead + lead, C.KickLookahead + lead
-lastScan = { clock = os.clock(), activeSlides = 0, activeKicks = 0, contacts = 0, maximumDisplayLead = 0,
-networkLeadSeconds = lead, tackleHorizonSeconds = tackleHorizon, kickHorizonSeconds = kickHorizon }
-local now, best = workspace:GetServerTimeNow(), nil
-for _, candidate in ipairs(candidates) do
-local other = candidate.character
-candidate.actor = actorFor(other, candidate.actor)
-if other.Parent and d.M.Motion.GetContext(other) == context
-and characterTeam(other, candidate.actor) == opposing then
--- Require an observed slide or a live native kick charge, never proximity alone.
-local untilTime = N.Tackle.GetSlidingUntil(other)
-local constants = N.Tackle.Constants
-local attack = attacks[other]
-if attack and attack.context == context and attack.slideStarted then
-untilTime = math.max(finite(untilTime) and untilTime or 0, attack.slideStarted + constants.TotalMotionSeconds)
-end
-local age = finite(untilTime) and now - (untilTime - constants.TotalMotionSeconds) or nil
-local hitboxEndsAt = constants.HitboxDelaySeconds + constants.HitboxSeconds
-local sliding = age ~= nil and age >= 0 and age <= hitboxEndsAt
--- Do not attach an old packet's direction to a newer replicated slide.
-local slideDirection = sliding and attack and attack.context == context and attack.slideStarted
-and math.abs(untilTime - (attack.slideStarted + constants.TotalMotionSeconds)) < 1e-4
-and attack.slideDirection or nil
-local kick = kickWindow(candidate, kickHorizon)
-if not sliding and not kick then continue end
-if sliding then lastScan.activeSlides += 1 end
-if kick then lastScan.activeKicks += 1 end
-local hum = other:FindFirstChildOfClass("Humanoid")
-local otherRoot = other:FindFirstChild("HumanoidRootPart")
-if hum and hum.Health > 0 and otherRoot then
-local otherCF = d.M.Motion.GetCFrame(other) or otherRoot.CFrame
-local otherVelocity = d.M.Motion.GetVelocity(other) or otherRoot.AssemblyLinearVelocity
-if vector(otherCF.Position) and vector(otherVelocity)
-and (otherCF.Position - ownCF.Position).Magnitude <= C.Range then
-local observedPosition = otherCF.Position
-local displayLead
-otherCF, displayLead = alignDisplayedMotion(other, otherCF, otherVelocity, sliding and age or nil, slideDirection)
-if displayLead > 0 then stats.motionAligned += 1 end
-lastScan.maximumDisplayLead = math.max(lastScan.maximumDisplayLead, displayLead)
-local uncertainPosition = displayLead > 0 and observedPosition or nil
-local eta = sliding and contactTime(ownCF, velocity, otherCF, otherVelocity, age, slideDirection, uncertainPosition, root.Size, tackleHorizon) or nil
-local kickEta = kick and kickContactTime(ownCF, velocity, otherCF, otherVelocity, kick.first, kick.direction, uncertainPosition, root.Size, kickHorizon) or nil
-local reason = "tackle"
-if kickEta and (not eta or kickEta < eta) then eta, reason = kickEta, "kick" end
-local distance = flat(otherCF.Position - ownCF.Position).Magnitude
-local observedDistance = flat(observedPosition - ownCF.Position).Magnitude
-if not lastScan.nearestThreat or observedDistance < lastScan.nearestThreat.observedDistance then
--- One bounded, read-only sample makes future misses diagnosable
--- without inferring exact geometry from a video or contact count.
-lastScan.nearestThreat = { target = other.Name, observedDistance = observedDistance,
-alignedDistance = distance, displayLeadSeconds = displayLead,
-poseShiftStuds = (otherCF.Position - observedPosition).Magnitude,
-slideAgeSeconds = sliding and age or nil,
-hitboxRemainingSeconds = sliding and hitboxEndsAt - age or nil,
-kickEarliestReleaseSeconds = kick and kick.first or nil,
-predictedContactSeconds = eta, contactPredicted = eta ~= nil,
-ownPosition = { ownCF.Position.X, ownCF.Position.Y, ownCF.Position.Z },
-ownVelocity = { velocity.X, velocity.Y, velocity.Z },
-observedPosition = { observedPosition.X, observedPosition.Y, observedPosition.Z },
-alignedPosition = { otherCF.Position.X, otherCF.Position.Y, otherCF.Position.Z },
-opponentVelocity = { otherVelocity.X, otherVelocity.Y, otherVelocity.Z },
-observedFacing = { otherCF.LookVector.X, otherCF.LookVector.Y, otherCF.LookVector.Z },
-slideDirection = slideDirection and { slideDirection.X, slideDirection.Y, slideDirection.Z } or nil,
-kickDirection = kick and kick.direction and { kick.direction.X, kick.direction.Y, kick.direction.Z } or nil }
-end
-if eta then lastScan.contacts += 1 end
-if eta and (not best or eta < best.eta or eta == best.eta and (distance or math.huge) < (best.distance or math.huge)) then
-best = { character = other, eta = eta, distance = distance, reason = reason,
-tackleAge = reason == "tackle" and age or nil,
-hitboxRemaining = reason == "tackle" and hitboxEndsAt - age or nil,
-kickChargeFill = reason == "kick" and kick.fill or nil,
-earliestRelease = reason == "kick" and kick.first or nil, displayLead = displayLead }
-end
-end
-end
-end
-end
-if not best or not eligible() then return end
-stats.threats += 1
-local input = N.Controls.CreateInput("Dribble")
-assert(input and N.Controls.IsInput("Dribble", input), "Native dribble binding unavailable")
-retryAt = os.clock() + C.RetrySeconds
-stats.attempts += 1
--- This owns cooldown, stamina, local movement and the action request together.
--- Do not call Init/Cleanup or synthesize a separate remote request.
-local attempt = { target = best.character.Name, contactSeconds = best.eta, distance = best.distance, reason = best.reason,
-tackleAgeSeconds = best.tackleAge, hitboxRemainingSeconds = best.hitboxRemaining,
-kickChargeFill = best.kickChargeFill, earliestReleaseSeconds = best.earliestRelease,
-displayLeadSeconds = best.displayLead,
-networkLeadSeconds = lead,
-serverConfirmed = false }
-if d.evaluation then
-d.evaluation.Dribble(attempt, function() d.M.Dodge.HandleInputBegan(input, false) end, best.character)
-else
-d.M.Dodge.HandleInputBegan(input, false)
-end
-local started = d.M.Dodge.IsDribbling() == true
-if started then
-pickupWindow = nil
-stats.started += 1
-if best.reason == "kick" then stats.kickTriggers += 1 else stats.tackleTriggers += 1 end
-else
-stats.nativeBlocked += 1
-end
-A.DribbleStatus = started and "DRIBBLING" or "NATIVE BLOCKED"
-attempt.localStarted = started
-recent[#recent + 1] = attempt
-if #recent > 8 then table.remove(recent, 1) end
-end
-local function runScan()
-queuedScan = nil
-local start = os.clock()
-scanning = true
-local succeeded, tickError = pcall(tick)
-scanning = false
-stats.maxTickMs = math.max(stats.maxTickMs, (os.clock() - start) * 1000)
-if not succeeded then stopDribbleWatch(tickError) end
-end
-requestScan = function()
-if queuedScan or not (alive and A.AutoDribble and d.alive()) then return end
-local ticket = {}
-queuedScan = ticket
-task.defer(function()
-if queuedScan ~= ticket or not (alive and A.AutoDribble and d.alive()) then return end
--- Evaluate every attacker using the latest packet batch. Coalesce
--- simultaneous starts/cancellations and never dispatch inside a
--- native ownership callback or recursively from our own input.
-nextTick = os.clock() + C.Interval
-runScan()
-end)
-end
--- Read only; used at 10 Hz exclusively during an explicit comparison run.
-function A.ObserveDribbleGate()
-if not (alive and A.AutoDribble and d.alive()) then return nil end
-local ch, rootOrReason = eligible()
--- Readiness alone does not imply a qualifying incoming attack.
-local gate = ch and "ready" or rootOrReason
-if not ch then
-if gate ~= "COOLDOWN / BLOCKED" and gate ~= "DRIBBLING"
-and gate ~= "LOW STAMINA" and gate ~= "RETRY WAIT" then return nil end
-ch = d.Player.Character
-end
-if gate == "COOLDOWN / BLOCKED" then
-gate = N.Controls.IsOnCooldown("Dribble") and "cooldown" or "native_blocked"
-elseif gate == "DRIBBLING" then gate = "active"
-elseif gate == "LOW STAMINA" then gate = "low_stamina"
-elseif gate == "RETRY WAIT" then gate = "retry_wait" end
-return ch, gate
-end
-function A.SetAutoDribble(value)
-value = value == true
-generation += 1
-local request = generation
-if not value then
-A.AutoDribble = false
-stopWatch()
-A.DribbleStatus = "OFF"
-return true
-end
-if not alive or not d.alive() or loadingDribble then return false end
-if A.AutoDribble then return true end
-loadingDribble = true
-local ok, err = pcall(loadDribble)
-loadingDribble = false
-if request ~= generation or not alive or not d.alive() then return false end
-if not ok then stopDribbleWatch(err); return false end
-A.AutoDribble, A.DribbleStatus, nextTick = true, "WATCHING", 0
-local connected, connectionError = pcall(function()
-watchNativeOwner()
-watchPickupReadiness()
-watchCharacters()
-watchAttacks()
-inputConnection = d.Input.InputBegan:Connect(function(input, processed)
-if not A.AutoDribble then return end
-local checked, inputError = pcall(function()
--- A GUI click can share the Kick binding without starting
--- a native strike. Do not give it a manual-action grace.
-if N.Input.ShouldIgnoreKeybind(processed)
-or (d.ignoreManualInput and d.ignoreManualInput(input)) then return end
-for _, name in ipairs({ "Kick", "Pass", "Lob", "RainbowFlick", "Dribble", "Tackle", "Jump" }) do
-if N.Controls.IsInput(name, input) then
-manualUntil = os.clock() + C.ManualGrace
-local ch = d.Player.Character
-manualHadBall = ch ~= nil and ownsBall(ch)
-break
-end
-end
-end)
-if not checked then stopDribbleWatch(inputError) end
-end)
-heartbeat = d.Run.Heartbeat:Connect(function()
-local start = os.clock()
-if not (alive and A.AutoDribble and d.alive()) or start < nextTick then return end
--- Keep the deadline cadence through uneven mobile frames. Never
--- run a catch-up loop or send multiple requests in one heartbeat.
-if nextTick == 0 then nextTick = start + C.Interval
-else nextTick += (math.floor((start - nextTick) / C.Interval) + 1) * C.Interval end
-runScan()
-end)
-end)
-if not connected then stopDribbleWatch(connectionError); return false end
-return true
 end
 function A.Cleanup()
 alive = false
@@ -6943,8 +6557,6 @@ blockedBy = table.clone(blockedBy), recentGates = table.clone(recentGates),
 lastScan = lastScan and table.clone(lastScan) or nil,
 stats = table.clone(stats), recent = table.clone(recent) }
 end
-if d.test then A.Test = { contactTime = contactTime, segmentBox = segmentBox, kickContactTime = kickContactTime,
-alignDisplayedMotion = alignDisplayedMotion } end
 return A
 end
 -- Bounded, passive evidence collection. No aim, physics, stamina or action decisions.
@@ -7104,7 +6716,6 @@ return r
 end
 sampleEncounters = function(now)
 if not probe or not d.Players then return end
--- Report() can be called freely without increasing sampling frequency.
 if trial.nextSample and now < trial.nextSample then return end
 trial.nextSample = now + 0.1
 local ch, gate = probe()
@@ -7197,7 +6808,6 @@ end
 local function shotSent(detail, frame, command, predictedPosition)
 local r = newRecord("shot", detail)
 if not r then return end
--- Native Release has already stamped its identifiers; never guess by timing alone.
 r.sessionId, r.actionId = command.SessionId, command.ActionId
 r.charge = command.ChargeSeconds
 r.curve = command.Curve or 0
@@ -7205,7 +6815,6 @@ r.predictionComparable = frame ~= nil and frame.character == r.character
 and frame.context == r.context and frame.ballId == r.ballId
 if r.predictionComparable then
 r.goal = frame.goal
--- Engine vectors are private; the public report contains only scalar errors.
 r.predictedPosition = predictedPosition
 r.mouth = frame.mouth
 end
@@ -7223,7 +6832,6 @@ episode.attemptIds[#episode.attemptIds + 1] = r.id
 end
 local character = r.character
 if character and type(character.GetAttributeChangedSignal) == "function" then
--- An already-active attribute is not evidence for this attempt.
 local seenInactive = character:GetAttribute("Dribbling") ~= true
 r.attributeConnection = character:GetAttributeChangedSignal("Dribbling"):Connect(function()
 protect(function()
@@ -7251,7 +6859,6 @@ if not r then return end
 r.localStarted = result[1] and d.M.Dodge.IsDribbling() == true
 if not r.localStarted then close(r, result[1] and "native_did_not_start" or "native_error") end
 end)
--- Only a native error propagates. Evidence failures never cancel an action.
 if not result[1] then error(result[2], 0) end
 return table.unpack(result, 2, result.n)
 end
@@ -7287,7 +6894,6 @@ for r in pairs(pending) do
 if r.kind == "shot" and r.ballId == packet.BallId then relevant = true; break end
 end
 if not relevant then return end
--- Only raw server packets qualify, never locally predicted Renderer states.
 local state = type(packet.State) == "table" and packet.State or packet
 if not vector(state.Position) or not finite(state.UpdatedAt or state.StartedAt) then
 stats.unreadableMovements += 1
@@ -7309,7 +6915,6 @@ stats.exactFlightMatches += 1
 end
 local stamp = state.UpdatedAt or state.StartedAt
 if not r.lastStateTime or stamp > r.lastStateTime then
--- Bracketed goal-plane crossing is an observation, not a score event.
 local mouth, old = r.mouth, r.lastPosition
 if mouth and old and not r.crossingObserved then
 local a, b = (old - mouth.plane):Dot(mouth.forward), (state.Position - mouth.plane):Dot(mouth.forward)
@@ -7536,16 +7141,13 @@ M = M, Player = LocalPlayer, Players = Players, Input = UserInputService,
 Run = RunService, Gui = game:GetService("GuiService"), load = module,
 id = game:GetService("HttpService"):GenerateGUID(false),
 alive = function() return S.alive end,
--- Visual UI interactions do not suspend the defensive threat watcher.
--- Native text/chat, menu, strike and recovery gates still apply.
 suspended = function() return not S.focused end, evaluation = EVALUATION,
 ignoreManualInput = function(input) return S.isUIInput and S.isUIInput(input) or false end,
 AttackRemotes = evaluationRemotes,
 })
 S.releaseMisc = MISC.Cleanup
 EVALUATION.ConfigureComparison(MISC.ObserveDribbleGate, function()
-return { bestShot = STR.Enabled, autoCurve = STR.AutoCurve, smartRelease = STR.SmartRelease,
-autoDribble = MISC.AutoDribble }
+return { bestShot = STR.Enabled, autoCurve = STR.AutoCurve, smartRelease = STR.SmartRelease, autoDribble = MISC.AutoDribble }
 end)
 ENV.DmcMisc = MISC
 ENV.DmcMiscDebug = function()
@@ -7687,7 +7289,6 @@ IgnoreGuiInset = true, DisplayOrder = 20,
 ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 }, PlayerGui)
 S.ui = Gui
--- Host position is in screen pixels; only the panel and its children scale.
 local host = create("Frame", {
 Name = "WindowHost", Position = UDim2.fromOffset(20, 138),
 Size = UDim2.fromOffset(0, 0), BackgroundTransparency = 1,
@@ -7714,7 +7315,6 @@ Position = UDim2.new(1, -36, 0, 8), Size = UDim2.fromOffset(24, 24),
 })
 local tabBar = frame(panel, "Tabs", 12, 44, 292, 26)
 tabBar.BackgroundTransparency = 1
--- STR is independent of the goalkeeper automation toggle.
 local strikerContent = frame(panel, "STRContent", 12, 76, 292, 333)
 strikerContent.BackgroundTransparency = 1
 strikerContent.Visible = false
@@ -7724,7 +7324,6 @@ local stateText = text(live, "STARTING", 10, {
 Name = "Status", Position = UDim2.fromOffset(24, 0),
 Size = UDim2.new(1, -34, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd,
 })
--- GK retains its existing controls in one scroll surface below the tabs.
 local content = create("ScrollingFrame", {
 Name = "MainContent", Position = UDim2.fromOffset(12, 114),
 Size = UDim2.fromOffset(292, 368), BackgroundTransparency = 1,
@@ -7749,21 +7348,7 @@ local activeTab = "GK"
 local settingsBusy = false
 local editingField = nil
 local colorPickerOpen = false
-local closeColorPicker: (() -> ())? = nil
--- Hit-test the current visible panel rather than hover state: the global
--- InputBegan observer may run before a control's own callback.
-S.isUIInput = function(input)
-if not S.alive or not Gui.Parent or not Gui.Enabled or not panel.Visible then return false end
-local kind = input.UserInputType
-if kind ~= Enum.UserInputType.MouseButton1 and kind ~= Enum.UserInputType.MouseButton2
-and kind ~= Enum.UserInputType.MouseButton3 and kind ~= Enum.UserInputType.Touch then return false end
-local point, position, size = input.Position, panel.AbsolutePosition, panel.AbsoluteSize
-return point.X >= position.X and point.X < position.X + size.X
-and point.Y >= position.Y and point.Y < position.Y + size.Y
-end
-local function updateUIBusy()
-S.uiBusy = dragging or rangeInput ~= nil or expanded ~= nil or settingsBusy or editingField ~= nil or colorPickerOpen
-end
+local closeColorPicker = nil
 local activeBody = nil
 local order = 0
 local function cancelAnimation(object)
@@ -7786,7 +7371,6 @@ TweenInfo.new(duration or 0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 animations[object] = tween
 animationGoals[object] = goals
 animationEnds[object] = tween.Completed:Connect(function(playbackState)
--- Cancellation also fires Completed; only the current finished tween owns this callback.
 if animations[object] ~= tween then return end
 local connection = animationEnds[object]
 if connection then connection:Disconnect() end
@@ -7905,7 +7489,6 @@ local state = text(control, "", 9, {
 Name = "Value", Position = UDim2.new(1, -69, 0, 0),
 Size = UDim2.fromOffset(30, 32), TextXAlignment = Enum.TextXAlignment.Right,
 })
--- One solid square owns the fill; no rounded mask or inset layer leaves dark corner cutouts.
 local box = frame(control, "Checkbox", 0, 7, 18, 18, C.control)
 box.Position = UDim2.new(1, -30, 0, 7)
 local border = stroke(box, C.accentDim)
@@ -7984,7 +7567,6 @@ animate(row, { Size = UDim2.new(1, 0, 0, open and (42 + menuHeight) or 34) },
 immediate, open and 0.18 or 0.14, function()
 if not entry.open then
 menu.Visible = false
--- The parent scroll surface retains its position as the row closes.
 end
 end)
 end
@@ -8044,7 +7626,6 @@ end)
 refresh(true)
 table.insert(refreshers, refresh)
 end
--- Existing settings and their original setters are inserted here verbatim.
 section("AUTOMATION")
 toggle(
 "Auto save",
@@ -8272,7 +7853,6 @@ ScrollingDirection = Enum.ScrollingDirection.Y,
 ScrollBarThickness = 2, ScrollBarImageColor3 = C.accentDim,
 CanvasSize = UDim2.fromOffset(0, 335),
 }, panel)
--- The saved accent stays static; only the displayed palette cycles.
 local currentAccent = SettingsStore.Accent
 local rainbowUI = SettingsStore.RainbowUI == true
 local rainbowHue, rainbowElapsed = 0, 0
@@ -8287,8 +7867,6 @@ end
 local function repaintPalette(hex, settleColors)
 setPalette(hex)
 if settleColors then
--- Color-only hover tweens may end at an older hue. Size and arrow
--- animations keep running when the rainbow switch changes.
 for object, goals in pairs(animationGoals) do
 local bindings, colorOnly = themeBindings[object] or {}, true
 for property in pairs(goals) do
@@ -8553,7 +8131,6 @@ SettingsStore.SetAppearance(profile.accent, profile.rainbowUI == true)
 return true, "Loaded."
 end)
 end)
--- The spectrum expands inside Settings and previews without writing storage.
 local function buildColorPicker()
 local body = round(frame(colorCard, "ColorPicker", 0, 103, 288, 0, C.surface), 5)
 body.Visible, body.ClipsDescendants = false, true
@@ -8586,7 +8163,7 @@ themeBindings[valueMarker].BackgroundColor3 = nil
 valueMarker.AnchorPoint = Vector2.new(0.5, 0.5)
 local patch = round(frame(body, "Preview", 12, 198, 62, 86, C.accent), 3)
 themeBindings[patch].BackgroundColor3 = nil
-local values: { [string]: TextBox } = {}
+local values = {}
 local h, s, v, updatingHSV = 0, 0, 0, false
 local colorOriginal, colorDrag, dragSurface = nil, nil, nil
 local function rgb(hex)
@@ -8627,7 +8204,6 @@ h, s, v = math.clamp(hue, 0, 1), math.clamp(sat, 0, 1), math.clamp(value, 0, 1)
 local color = Color3.fromHSV(h, s, v)
 local hex = string.format("%02X%02X%02X", math.floor(color.R * 255 + 0.5),
 math.floor(color.G * 255 + 0.5), math.floor(color.B * 255 + 0.5))
--- Preserve the chosen hue through grey/black and RGB rounding.
 updatingHSV = true
 if hex ~= currentAccent then applyTheme(hex) else draw() end
 updatingHSV = false
