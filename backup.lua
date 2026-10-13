@@ -1,3 +1,8 @@
+-- COMPATIBILITY POLYFILLS (Ensures it loads on ANY executor)
+if not table.clear then function table.clear(t) for k in pairs(t) do t[k] = nil end end end
+if not table.find then function table.find(t, v) for i, val in pairs(t) do if val == v then return i end end return nil end end
+if not table.clone then function table.clone(t) local n = {} for k, v in pairs(t) do n[k] = v end return n end end
+
 local function createDmcConfigStore(d)
 local A = { Accent = "DEC173", RainbowUI = false, Selected = "", Storage = "Session only", Notice = "" }
 local document = { schema = 1, profiles = {}, accent = A.Accent, rainbowUI = false, selected = "" }
@@ -361,10 +366,6 @@ return object
 end,
 })
 BOOT.Run(function()
--- DMC MAIN BEGIN
---==============================================================
--- SERVICES
---==============================================================
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -387,9 +388,6 @@ encode = function(value) return settingsHttp:JSONEncode(value) end,
 decode = function(value) return settingsHttp:JSONDecode(value) end,
 remember = function(value) ENV.__DMC_CONFIG_CACHE = value end,
 })
---==============================================================
--- MODULES
---==============================================================
 local function resolve(path)
 local object = ReplicatedStorage
 for name in string.gmatch(path, "[^.]+") do
@@ -446,9 +444,6 @@ assert(released == true,
 "Previous Auto GK cleanup was not confirmed: "
 .. tostring(detail or "Older cleanup has no success result; rejoin once before loading this version"))
 end
---==============================================================
--- CONFIGURATION
---==============================================================
 local Config = {
 Enabled = true,
 PositionAssist = true,
@@ -495,7 +490,7 @@ MaxFinalCandidates = 14,
 RuntimeErrorRetrySeconds = 0.25,
 RuntimeErrorLimit = 3,
 Debug = false,
-LegitPrediction = true,
+LegitPrediction = false,
 AutoAttack = false,
 }
 local Stats = {
@@ -511,9 +506,6 @@ ENV.AutoGKConfig = Config
 ENV.AutoGKStats = Stats
 ENV.AUTO_GK_ENABLED = true
 ENV.AutoGKBuild = BUILD
---==============================================================
--- LIFECYCLE
---==============================================================
 local S = {
 alive = true,
 cleanupComplete = false,
@@ -794,9 +786,6 @@ S.focused = true
 S.manualUntil = os.clock() + Config.ManualReleaseGrace
 S.nextPlanAt = 0
 end)
---==============================================================
--- ACTION ACCOUNTING
---==============================================================
 local function recordRequest(kind, frame)
 Stats.Requests = Stats.Requests + 1
 if kind == "JUMP" then
@@ -810,9 +799,6 @@ S.countedFlights[key] = true
 Stats.FlightsActedOn = Stats.FlightsActedOn + 1
 end
 end
---==============================================================
--- MOVEMENT OWNERSHIP
---==============================================================
 local function resetPositionTarget()
 S.positionActive = false
 S.positionTarget = nil
@@ -916,33 +902,11 @@ lease.cancelRetryAt = os.clock() + 1
 releaseMotionController(lease)
 end
 end
-for _, lease in pairs(S.retiredLocks) do
-if os.clock() >= (lease.retryAt or 0) then
-lease.retryAt = os.clock() + 1
-releaseMotionLock(lease)
+for lockName in pairs(S.retiredLocks) do
+if os.clock() >= (S.retiredLocks[lockName].retryAt or 0) then
+S.retiredLocks[lockName].retryAt = os.clock() + 1
+releaseMotionLock(S.retiredLocks[lockName])
 end
-end
-local lease = S.motionLease
-if not lease then return end
-if not lease.root.Parent
-or LocalPlayer.Character ~= lease.character then
-finishMotion(true, lease)
-return
-end
-if lease.controller
-and type(lease.controller.IsActive) == "function" then
-local ok, active = pcall(lease.controller.IsActive)
-if ok and active == false then
-finishMotion(false, lease)
-return
-end
-end
-if os.clock() >= lease.deadline then
-report(
-"OWN MOTION TIMEOUT",
-"Releasing an unfinished automatic dive"
-)
-finishMotion(true, lease)
 end
 end
 local function manualJumpHeld()
@@ -1079,9 +1043,6 @@ return "MOVEMENT LOCK"
 end
 return nil
 end
---==============================================================
--- DEFENDED GOAL
---==============================================================
 local function contextFor(root, state)
 local goal = M.Practice.GetDefendedGoalPart()
 local mode, team, attack = "PRACTICE", nil, nil
@@ -1149,9 +1110,6 @@ math.abs(frame.RightVector:Dot(axis)) * size.X
 + math.abs(frame.LookVector:Dot(axis)) * size.Z
 ) * 0.5)
 end
---==============================================================
--- BALL SNAPSHOT
---==============================================================
 local function readBall()
 local ballId = M.Renderer.GetMatchBallId()
 local owner = M.Renderer.GetOwnedUserId()
@@ -1380,9 +1338,6 @@ or nil,
 radius = radius,
 }
 end
---==============================================================
--- TRAJECTORY MODELS
---==============================================================
 local function naturalRoot(f, t)
 local dy = 0
 if not f.landed then
@@ -1525,9 +1480,6 @@ f.radius * 2
 )
 return paddedBox(M.Hitboxes.AirReceive, padding)
 end
---==============================================================
--- THREE-DIMENSIONAL CONTACT VALIDATION
---==============================================================
 local function diveContactBounds(f, plan)
 local box = M.Hitboxes.AirReceive
 local padding = M.Contacts.Constants.ContactPadding or 1.25
@@ -2228,9 +2180,6 @@ and "NO CONTACT / SEARCH LIMIT"
 or "NO PRE-GOAL CONTACT"
 )
 end
---==============================================================
--- NATIVE JUMP STATE
---==============================================================
 local function requestJump(f, plan)
 if not Config.HighBallJumps then return false end
 if plan.kind == "JUMP_DIVE"
@@ -2240,9 +2189,8 @@ end
 if not authorizedFrame(f) or manualJumpHeld() then
 return false
 end
--- Legit Prediction: Add a tiny, safe human-like reaction variance
-if Config.LegitPrediction then
-S.queueEstimate = math.clamp(S.queueEstimate + (math.random(20, 60) / 1000), 0.05, 0.15)
+if Config.LegitPrediction and f.eta and f.eta > 0.6 then
+S.nextActionAt = os.clock() + (math.random(100, 250) / 1000)
 end
 if S.ownedMove then
 releaseMove(true)
@@ -2424,9 +2372,6 @@ S.jump = nil
 end
 return false
 end
---==============================================================
--- HOLD COMMIT VALIDATION
---==============================================================
 local function confirmHold(f)
 if not authorizedFrame(f) then return false end
 S.allowPositioning = false
@@ -2493,9 +2438,6 @@ string.format("Rechecked receive in %.3fs", hit.time)
 )
 return true
 end
---==============================================================
--- INPUT AND FRAME RESET
---==============================================================
 local function cancelQueuedJump()
 return cancelOwnedJumpQueue()
 end
@@ -2616,9 +2558,6 @@ return
 end
 end
 end)
---==============================================================
--- DIVE REQUEST AND RECOVERY
---==============================================================
 local function requestDive(f, plan)
 if not authorizedFrame(f) then return false end
 if plan.kind ~= "DIVE" or plan.delay ~= 0 then
@@ -2732,6 +2671,9 @@ return false
 end
 if S.jump and not Config.JumpThenDive then
 return false
+end
+if Config.LegitPrediction and fresh.eta and fresh.eta > 0.6 then
+S.nextActionAt = os.clock() + (math.random(100, 250) / 1000)
 end
 S.nextLeaseId = S.nextLeaseId + 1
 local lease = {
@@ -2894,10 +2836,10 @@ sentActionId
 ))
 return true
 end
---==============================================================
--- POSITION ASSIST
---==============================================================
+-- Forward declaration of Rush so position() doesn't crash on nil
+local Rush = {}
 local function position(f, dt)
+if Rush.candidate ~= nil then releaseMove(true); return end
 if not S.allowPositioning or not Config.PositionAssist then
 releaseMove(true)
 return
@@ -3120,9 +3062,6 @@ S.ownedMove = desired
 S.moveCharacter = f.character
 S.positionWrites = S.positionWrites + 1
 end
---==============================================================
--- OBSERVATIONS
---==============================================================
 local function pendingActionId()
 local pending = S.pending
 if not pending then
@@ -3243,25 +3182,20 @@ log(
 .. tostring(packet.Command.ActionId)
 )
 end)
---==============================================================
--- CLOSE-RANGE RUSH (HEAVILY OPTIMIZED)
---==============================================================
 Config.CloseRangeRush = true
 Stats.RushRequests = 0
-local Rush = {
-Role = M.Role,
-Actors = M.Actors,
-Motion = M.Motion,
-Range = 20, -- Increased range
-GoalDepth = 30,
-ContactHorizon = 0.40,
-ScanInterval = 0.03, -- Ultra-fast scanning
-ConfirmSeconds = 0.03, -- Instant confirmation
-nextScan = 0,
-candidate = nil,
-candidateSince = 0,
-lastSeenAt = 0,
-}
+Rush.Role = M.Role
+Rush.Actors = M.Actors
+Rush.Motion = M.Motion
+Rush.Range = 20
+Rush.GoalDepth = 30
+Rush.ContactHorizon = 0.40
+Rush.ScanInterval = 0.03
+Rush.ConfirmSeconds = 0.03
+Rush.nextScan = 0
+Rush.candidate = nil
+Rush.candidateSince = 0
+Rush.lastSeenAt = 0
 local function rushVector(v)
 return finiteVector(v)
 end
@@ -3361,7 +3295,6 @@ end
 if velocity:Dot(context.forward) > 2 then
 return nil
 end
--- Auto Attack ignores all facing/movement checks
 if Config.AutoAttack then
     if distance > Rush.Range then return nil end
 else
@@ -3523,7 +3456,7 @@ f.cameraCF,
 unit(f.rootCF.LookVector)
 )
 if rushDirectionAllowed(direction, f.context)
-and direction:Dot(toward) > 0.30 then -- Relaxed dot product for aggressive targeting
+and direction:Dot(toward) > 0.30 then
 local plan = {
 kind = "DIVE",
 name = name,
@@ -3703,9 +3636,6 @@ plan.contact
 ))
 return true
 end
---==============================================================
--- PRE-SHOT ANGLE COVERAGE
---==============================================================
 local function coverageTarget(context, ballPosition, ballVelocity)
 local lead = flat(ballVelocity) * Config.CoverageLeadSeconds
 if lead.Magnitude > Config.CoverageMaximumLead then
@@ -3890,9 +3820,6 @@ or "Holding the covered angle"
 end
 return true
 end
---==============================================================
--- MAIN LOOP
---==============================================================
 local function tick(dt)
 if not S.alive then return end
 serviceOwnedMotion()
