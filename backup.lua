@@ -1,46 +1,3 @@
--- COMPATIBILITY POLYFILLS FOR OLDER EXECUTORS --
-task = task or {}
-task.wait = task.wait or wait or function(t) local s = os.clock() while os.clock() - s < (t or 0) do end end
-task.spawn = task.spawn or spawn or coroutine.resume
-task.defer = task.defer or function(f, ...) f(...) end
-
-if not table.clear then
-    function table.clear(t)
-        for k in pairs(t) do t[k] = nil end
-    end
-end
-if not table.find then
-    function table.find(t, value)
-        for i, v in pairs(t) do
-            if v == value then return i end
-        end
-        return nil
-    end
-end
-if not table.clone then
-    function table.clone(t)
-        local new = {}
-        for k, v in pairs(t) do new[k] = v end
-        return new
-    end
-end
-if not table.pack then
-    function table.pack(...)
-        local t = {...}
-        t.n = select("#", ...)
-        return t
-    end
-end
-if not table.unpack then
-    table.unpack = unpack
-end
-if not math.clamp then
-    function math.clamp(v, min, max)
-        return v < min and min or (v > max and max or v)
-    end
-end
--- END POLYFILLS --
-
 local function createDmcConfigStore(d)
 local A = { Accent = "DEC173", RainbowUI = false, Selected = "", Storage = "Session only", Notice = "" }
 local document = { schema = 1, profiles = {}, accent = A.Accent, rainbowUI = false, selected = "" }
@@ -213,12 +170,8 @@ for _, key in ipairs({ "CloseRangeRush", "HighBallJumps", "JumpThenDive", "Backw
 gk.Enabled = d.gkEnabled()
 gk.DiveFilter = d.config.DiveFilter == "ALL" and "SMART" or d.config.DiveFilter
 return { goalkeeper = gk,
-striker = {
-Enabled = d.striker.Enabled,
-AutoCurve = d.striker.AutoCurve,
-SmartRelease = d.striker.SmartRelease,
-Randomizer = d.striker.Randomizer,
-Range = d.striker.GetAssistRange() },
+striker = { Enabled = d.striker.Enabled, AutoCurve = d.striker.AutoCurve,
+SmartRelease = d.striker.SmartRelease, Randomizer = d.striker.Randomizer, Range = d.striker.GetAssistRange() },
 misc = { AutoDribble = d.misc.AutoDribble },
 accent = d.accent(), rainbowUI = d.rainbow and d.rainbow() == true or false }
 end
@@ -542,7 +495,7 @@ MaxFinalCandidates = 14,
 RuntimeErrorRetrySeconds = 0.25,
 RuntimeErrorLimit = 3,
 Debug = false,
-LegitPrediction = false,
+LegitPrediction = true,
 AutoAttack = false,
 }
 local Stats = {
@@ -963,11 +916,33 @@ lease.cancelRetryAt = os.clock() + 1
 releaseMotionController(lease)
 end
 end
-for lockName in pairs(S.retiredLocks) do
-if os.clock() >= (S.retiredLocks[lockName].retryAt or 0) then
-S.retiredLocks[lockName].retryAt = os.clock() + 1
-releaseMotionLock(S.retiredLocks[lockName])
+for _, lease in pairs(S.retiredLocks) do
+if os.clock() >= (lease.retryAt or 0) then
+lease.retryAt = os.clock() + 1
+releaseMotionLock(lease)
 end
+end
+local lease = S.motionLease
+if not lease then return end
+if not lease.root.Parent
+or LocalPlayer.Character ~= lease.character then
+finishMotion(true, lease)
+return
+end
+if lease.controller
+and type(lease.controller.IsActive) == "function" then
+local ok, active = pcall(lease.controller.IsActive)
+if ok and active == false then
+finishMotion(false, lease)
+return
+end
+end
+if os.clock() >= lease.deadline then
+report(
+"OWN MOTION TIMEOUT",
+"Releasing an unfinished automatic dive"
+)
+finishMotion(true, lease)
 end
 end
 local function manualJumpHeld()
@@ -2265,8 +2240,9 @@ end
 if not authorizedFrame(f) or manualJumpHeld() then
 return false
 end
-if Config.LegitPrediction and f.eta and f.eta > 0.6 then
-S.nextActionAt = os.clock() + (math.random(100, 250) / 1000)
+-- Legit Prediction: Add a tiny, safe human-like reaction variance
+if Config.LegitPrediction then
+S.queueEstimate = math.clamp(S.queueEstimate + (math.random(20, 60) / 1000), 0.05, 0.15)
 end
 if S.ownedMove then
 releaseMove(true)
@@ -2428,7 +2404,8 @@ S.queueEstimate * 0.7
 + boundedDelay * 0.3
 releaseJumpLatch()
 log(string.format(
-"JUMP AIRBORNE | sampled delay %.3fs | planning estimate %.3fs",
+"JUMP AIRBORNE | sampled delay %.3fs"
+.. " | planning estimate %.3fs",
 observedDelay,
 S.queueEstimate
 ))
@@ -2756,9 +2733,6 @@ end
 if S.jump and not Config.JumpThenDive then
 return false
 end
-if Config.LegitPrediction and fresh.eta and fresh.eta > 0.6 then
-S.nextActionAt = os.clock() + (math.random(100, 250) / 1000)
-end
 S.nextLeaseId = S.nextLeaseId + 1
 local lease = {
 id = S.nextLeaseId,
@@ -2910,7 +2884,8 @@ fresh.eta
 )
 end
 log(string.format(
-"DIVE SENT | %s | corrected contact %.3fs | goal %.3fs | margin %.3fs | id %.0f",
+"DIVE SENT | %s | corrected contact %.3fs"
+.. " | goal %.3fs | margin %.3fs | id %.0f",
 commit.name,
 hit.time,
 fresh.eta,
@@ -2922,9 +2897,7 @@ end
 --==============================================================
 -- POSITION ASSIST
 --==============================================================
-local Rush = {}
 local function position(f, dt)
-if Rush.candidate ~= nil then releaseMove(true); return end
 if not S.allowPositioning or not Config.PositionAssist then
 releaseMove(true)
 return
@@ -3275,18 +3248,20 @@ end)
 --==============================================================
 Config.CloseRangeRush = true
 Stats.RushRequests = 0
-Rush.Role = M.Role
-Rush.Actors = M.Actors
-Rush.Motion = M.Motion
-Rush.Range = 20
-Rush.GoalDepth = 30
-Rush.ContactHorizon = 0.40
-Rush.ScanInterval = 0.03
-Rush.ConfirmSeconds = 0.03
-Rush.nextScan = 0
-Rush.candidate = nil
-Rush.candidateSince = 0
-Rush.lastSeenAt = 0
+local Rush = {
+Role = M.Role,
+Actors = M.Actors,
+Motion = M.Motion,
+Range = 20, -- Increased range
+GoalDepth = 30,
+ContactHorizon = 0.40,
+ScanInterval = 0.03, -- Ultra-fast scanning
+ConfirmSeconds = 0.03, -- Instant confirmation
+nextScan = 0,
+candidate = nil,
+candidateSince = 0,
+lastSeenAt = 0,
+}
 local function rushVector(v)
 return finiteVector(v)
 end
@@ -3386,10 +3361,11 @@ end
 if velocity:Dot(context.forward) > 2 then
 return nil
 end
+-- Auto Attack ignores all facing/movement checks
 if Config.AutoAttack then
-if distance > Rush.Range then return nil end
+    if distance > Rush.Range then return nil end
 else
-if distance > 15 then return nil end
+    if distance > 15 then return nil end
 end
 local floorY = M.Grounding.GetStandingY(humanoid, root)
 if not finite(floorY) then return nil end
@@ -3547,7 +3523,7 @@ f.cameraCF,
 unit(f.rootCF.LookVector)
 )
 if rushDirectionAllowed(direction, f.context)
-and direction:Dot(toward) > 0.30 then
+and direction:Dot(toward) > 0.30 then -- Relaxed dot product for aggressive targeting
 local plan = {
 kind = "DIVE",
 name = name,
@@ -5366,7 +5342,11 @@ duplicate = seen
 break
 end
 end
-if not duplicate then
+if duplicate then
+entry.checkedAt = duplicate.checkedAt
+audit.duplicatesSkipped = audit.duplicatesSkipped + 1
+continue
+end
 checked = checked + 1
 owner.validationSequence = (owner.validationSequence or 0) + 1
 entry.checkedAt = owner.validationSequence
@@ -5441,14 +5421,15 @@ or (not owner.redirected and "AIM CONFIRMED" or (best.gap >= C.ClearGapThreshold
 decisionDetail(owner))
 local scope = scopes[thread()]
 if scope then scope.applied = true end
+-- RANDOMIZER LOGIC: Spin aim wildly, but save the perfect aim for release
 if A.Randomizer and chosen then
-session.lastPerfectAim = chosen.Direction
-local chaosYaw = math.rad(math.random(-180, 180))
-local chaosPitch = math.rad(math.random(-45, 45))
-local randomDir = Vector3.new(math.sin(chaosYaw) * math.cos(chaosPitch), math.sin(chaosPitch), math.cos(chaosYaw) * math.cos(chaosPitch))
-local randomAim = table.clone(chosen)
-randomAim.Direction = randomDir
-return randomAim
+    session.lastPerfectAim = chosen.Direction
+    local chaosYaw = math.rad(math.random(-180, 180))
+    local chaosPitch = math.rad(math.random(-45, 45))
+    local randomDir = Vector3.new(math.sin(chaosYaw) * math.cos(chaosPitch), math.sin(chaosPitch), math.cos(chaosYaw) * math.cos(chaosPitch))
+    local randomAim = table.clone(chosen)
+    randomAim.Direction = randomDir
+    return randomAim
 end
 return chosen
 end
@@ -5759,8 +5740,9 @@ hook(d.M.Protocol, "Release", function(original) return function(command)
 local source = command
 local evaluationRecord, evaluationFrame, evaluationPosition
 command = curveCommand(command)
+-- RANDOMIZER LOGIC: Snap the aim to the perfect goal location right as we shoot
 if A.Randomizer and session and session.lastPerfectAim then
-command.AimDirection = session.lastPerfectAim
+    command.AimDirection = session.lastPerfectAim
 end
 if alive and A.Enabled and session and command.PassType == d.M.Actions.PassTypes.Shot then
 stats.shots = stats.shots + 1
@@ -5886,8 +5868,8 @@ if session and not A.SmartRelease then session.smartRelease = false end
 return true
 end
 function A.SetRandomizer(value)
-A.Randomizer = value == true
-return true
+    A.Randomizer = value == true
+    return true
 end
 function A.GetAssistRange()
 return C.MaxAssistDistance
@@ -5913,8 +5895,16 @@ defenderAwareness = true,
 releaseTiming = session and session.releaseTiming or nil,
 maxAssistDistance = C.MaxAssistDistance, clearGapThreshold = C.ClearGapThreshold }
 end
+if d.test then A.Test = { mouthFor = mouthFor, mouthDistance = mouthDistance, keeperGap = keeperGap,
+reachDemand = reachDemand, validate = validate, defenderDemand = defenderDemand, defenderProfile = defenderProfile,
+betterRating = betterRating,
+solve = solve, frame = frame, scopeCall = scopeCall, choose = choose, native = N,
+compatible = compatible, launch = launch, rate = rate, stats = stats, keepersFor = keepersFor, candidateAim = candidateAim,
+horizontalReach = horizontalReach, searchTargets = searchTargets, shotZone = shotZone, insetAim = insetAim,
+setSession = function(value) session = value end, getSession = function() return session end } end
 return A
 end
+-- Auto dribble uses the game's native input, cooldowns and stamina rules.
 local function createStrikerMisc(d)
 local A = { AutoDribble = false, DribbleStatus = "OFF" }
 local N = {}
@@ -6473,7 +6463,7 @@ local slideDirection = sliding and attack and attack.context == context and atta
 and math.abs(untilTime - (attack.slideStarted + constants.TotalMotionSeconds)) < 1e-4
 and attack.slideDirection or nil
 local kick = kickWindow(candidate, kickHorizon)
-if sliding or kick then
+if not sliding and not kick then continue end
 if sliding then lastScan.activeSlides = lastScan.activeSlides + 1 end
 if kick then lastScan.activeKicks = lastScan.activeKicks + 1 end
 local hum = other:FindFirstChildOfClass("Humanoid")
@@ -6656,8 +6646,11 @@ blockedBy = table.clone(blockedBy), recentGates = table.clone(recentGates),
 lastScan = lastScan and table.clone(lastScan) or nil,
 stats = table.clone(stats), recent = table.clone(recent) }
 end
+if d.test then A.Test = { contactTime = contactTime, segmentBox = segmentBox, kickContactTime = kickContactTime,
+alignDisplayedMotion = alignDisplayedMotion } end
 return A
 end
+-- Bounded, passive evidence collection. No aim, physics, stamina or action decisions.
 local function createStrikerEvaluation(d)
 local A = {}
 local alive, sequence, heartbeat = true, 0, nil
